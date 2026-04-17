@@ -12,18 +12,25 @@ Pure Python backend game logic lives in `game_backend/`. No Discord commands, no
 
 | File | Purpose |
 |---|---|
+| `game_backend/db.py` | SQLite layer; `country_state` table; per-server isolation via `server_id` |
 | `game_backend/time_system.py` | In-game calendar, tick advancement, speed settings (1x–5x + pause) |
-| `game_backend/diplomacy_system.py` | Bilateral relation points, tiers, gifts, religious persecution |
+| `game_backend/religion_system.py` | `Religion` enum (Islam/Christianity/Judaism/Hinduism/Atheism); `ReligionSystem` for DB reads/writes |
+| `game_backend/diplomacy_system.py` | Bilateral relation points, tiers, dynamic modifiers (religion -2), gifts, persecution |
+| `game_backend/economy_system.py` | Treasury and daily income; update per tick days; transfer/deposit/withdraw |
+| `game_backend/population_system.py` | Population with monthly compound growth; integrates with tick days |
 | `game_backend/war_system.py` | War declaration, occupation, war score, treaty resolution, ceasefires, vassals, reparations |
-| `game_backend/demo.py` | Smoke-test runner for all three systems |
+| `game_backend/demo.py` | Full smoke-test runner for all six systems |
 
 Run the demo: `python3 -m game_backend.demo`
 
 ### Key Design Decisions
 - Time overflows correctly (days → months → years) using flat day-index arithmetic
-- Diplomacy uses a canonical-key lookup `(min(a,b), max(a,b))` so each pair has one entry
+- Diplomacy: base relation stored in memory; `get_effective_relation()` adds modifiers dynamically without touching stored value
+- Religion modifier: -2 effective penalty when two countries follow different religions; computed at query time only
+- All DB operations isolated by `(server_id, country_id)` — multiple Discord guilds share one SQLite file safely
+- Economy: `update_treasury(days)` called each tick; income sources (factories, trade, etc.) added via `add_income()`
+- Population: compound growth formula `P × (1 + r)^n` per complete in-game month (30 days)
 - War score is signed: positive = attacker winning, negative = defender winning
-- All three systems serialise/deserialise cleanly via `.to_dict()` / `.from_dict()`
 - Ceasefire = 1080 in-game days (3 years × 12 months × 30 days)
 
 ## Stack

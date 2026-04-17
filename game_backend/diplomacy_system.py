@@ -12,12 +12,23 @@ Relation scale:
 Relations are stored as a symmetric lookup table keyed by a canonical
 (country_a, country_b) tuple where country_a < country_b (alphabetical).
 This guarantees each pair has exactly one entry regardless of lookup order.
+
+Dynamic modifiers
+-----------------
+``get_effective_relation()`` returns the base relation PLUS all active
+dynamic modifiers.  Modifiers are computed at query time and never touch
+the stored base value.
+
+Current modifiers:
+  • Different religion  →  -2
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+
+from game_backend.religion_system import DIFFERENT_RELIGION_MODIFIER
 
 
 # ---------------------------------------------------------------------------
@@ -129,42 +140,99 @@ class DiplomacySystem:
         """Return a sorted list of all registered country names."""
         return sorted(self._countries.keys())
 
+    def update_country_religion(self, name: str, religion: str) -> None:
+        """
+        Update the in-memory religion for a registered country.
+
+        Call this whenever the DB-backed religion changes (e.g. after
+        ReligionSystem.set_religion()) so that dynamic modifiers in
+        ``get_effective_relation()`` stay in sync with persisted data.
+        """
+        self._require_country(name)
+        self._countries[name].religion = religion
+
     # ------------------------------------------------------------------
     # Relation read access
     # ------------------------------------------------------------------
 
     def get_relation(self, country_a: str, country_b: str) -> int:
-        """Return the current relation score between two countries (-10 to 30)."""
+        """
+        Return the stored base relation score between two countries (-10 to 30).
+        This is the raw value before any dynamic modifiers are applied.
+        Use ``get_effective_relation()`` for the final diplomatic value.
+        """
         self._require_pair(country_a, country_b)
         return self._relations[self._make_key(country_a, country_b)]
 
+    def get_effective_relation(self, country_a: str, country_b: str) -> int:
+        """
+        Return the effective relation score after applying all dynamic modifiers.
+
+        Dynamic modifiers are computed at call time and do NOT alter the stored
+        base relation.  The result is clamped to [RELATION_MIN, RELATION_MAX].
+
+        Current modifiers
+        -----------------
+        • Different religion → -2
+        """
+        base      = self.get_relation(country_a, country_b)
+        modifier  = sum(m["delta"] for m in self.compute_modifiers(country_a, country_b))
+        effective = max(RELATION_MIN, min(RELATION_MAX, base + modifier))
+        return effective
+
+    def compute_modifiers(self, country_a: str, country_b: str) -> list[dict]:
+        """
+        Return a list of active modifier dicts for the pair.
+        Each dict has keys: ``delta`` (int) and ``reason`` (str).
+
+        This is the single place to register new dynamic relation modifiers.
+        Future modifiers (trade agreements, shared enemies, etc.) go here.
+        """
+        self._require_pair(country_a, country_b)
+        modifiers: list[dict] = []
+
+        # --- Different-religion penalty ---
+        rel_a = self._countries[country_a].religion
+        rel_b = self._countries[country_b].religion
+        if rel_a and rel_b and rel_a.lower() != rel_b.lower():
+            modifiers.append({
+                "delta":  DIFFERENT_RELIGION_MODIFIER,
+                "reason": f"Different religions ({rel_a} vs {rel_b})",
+            })
+
+        return modifiers
+
     def get_relation_tier(self, country_a: str, country_b: str) -> RelationTier:
-        """Return the diplomatic tier based on current relation score."""
-        value = self.get_relation(country_a, country_b)
+        """Return the diplomatic tier based on the effective relation score."""
+        value = self.get_effective_relation(country_a, country_b)
         return RelationTier.from_value(value)
 
     def can_declare_war(self, attacker: str, defender: str) -> bool:
-        """War may only be declared when relations are strictly negative."""
-        return self.get_relation(attacker, defender) < 0
+        """War may be declared when the effective relation is strictly negative."""
+        return self.get_effective_relation(attacker, defender) < 0
 
     def can_form_defense_pact(self, country_a: str, country_b: str) -> bool:
-        return self.get_relation(country_a, country_b) >= TIER_DEFENSE_PACT_MIN
+        return self.get_effective_relation(country_a, country_b) >= TIER_DEFENSE_PACT_MIN
 
     def can_form_alliance(self, country_a: str, country_b: str) -> bool:
-        return self.get_relation(country_a, country_b) >= TIER_ALLIANCE_MIN
+        return self.get_effective_relation(country_a, country_b) >= TIER_ALLIANCE_MIN
 
     def all_relations(self) -> list[dict]:
         """
         Return every bilateral relation as a list of dicts.
+        Includes both base value and effective value (after modifiers).
         Useful for status embeds or database persistence.
         """
         result = []
         for (a, b), value in self._relations.items():
+            effective = self.get_effective_relation(a, b)
             result.append({
-                "country_a": a,
-                "country_b": b,
-                "value":     value,
-                "tier":      RelationTier.from_value(value).value,
+                "country_a":       a,
+                "country_b":       b,
+                "base_value":      value,
+                "effective_value": effective,
+                "modifiers":       self.compute_modifiers(a, b),
+                "tier":            RelationTier.from_value(effective).value,
             })
         return result
 
