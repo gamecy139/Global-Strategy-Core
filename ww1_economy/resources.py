@@ -1,0 +1,369 @@
+"""
+WW1 ECONOMY — RESOURCE & BUILDING DEFINITIONS
+----------------------------------------------
+All Tier 1 and Tier 2 resources for the WW1 scenario, plus complete
+building configuration data-classes.
+
+This module is pure data — no I/O, no database access.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import FrozenSet
+
+
+# ---------------------------------------------------------------------------
+# Resources
+# ---------------------------------------------------------------------------
+
+class Tier1Resource(str, Enum):
+    """Raw / natural resources extracted by Tier 1 buildings."""
+    IRON   = "iron"
+    COAL   = "coal"
+    COPPER = "copper"
+    STONE  = "stone"
+    WOOD   = "wood"
+    RUBBER = "rubber"
+    GRAIN  = "grain"
+    MEAT   = "meat"
+    HORSES = "horses"
+    COTTON = "cotton"
+    OIL    = "oil"
+    GOLD   = "gold"   # special: goes directly to treasury
+    GEMS   = "gems"
+
+
+class Tier2Resource(str, Enum):
+    """Manufactured / processed resources produced by Tier 2 buildings."""
+    TEXTILES    = "textiles"
+    CHEMICALS   = "chemicals"
+    GUNPOWDER   = "gunpowder"
+    AMMUNITION  = "ammunition"
+    MEDICINES   = "medicines"
+
+
+# All resources that can be stored in country_storage (gold is excluded)
+STORABLE_RESOURCES: tuple[str, ...] = (
+    "iron", "coal", "copper", "stone",
+    "wood", "rubber",
+    "grain", "meat",
+    "horses",
+    "cotton",
+    "oil",
+    "gems",
+    "textiles", "chemicals", "gunpowder", "ammunition", "medicines",
+)
+
+# Convenience set for fast membership checks
+STORABLE_RESOURCE_SET: frozenset[str] = frozenset(STORABLE_RESOURCES)
+
+ALL_RESOURCE_NAMES: frozenset[str] = frozenset(
+    r.value for r in Tier1Resource
+) | frozenset(r.value for r in Tier2Resource)
+
+
+# ---------------------------------------------------------------------------
+# Building tiers
+# ---------------------------------------------------------------------------
+
+class BuildingTier(str, Enum):
+    TIER1 = "tier1"
+    TIER2 = "tier2"
+
+
+class BuildingType(str, Enum):
+    """All building types for the WW1 scenario."""
+    # Tier 1 — resource-dependent
+    MINE              = "Mine"
+    LOGGING_CAMP      = "Logging Camp"
+    FARM              = "Farm"
+    RANCH             = "Ranch"
+    PLANTATION        = "Plantation"
+    OIL_RIG           = "Oil Rig"
+    PRECIOUS_MINE     = "Precious Mine"
+
+    # Tier 2 — industrial, province-independent
+    TEXTILE_MILL      = "Textile Mill"
+    CHEMICAL_PLANT    = "Chemical Plant"
+    POWDER_MILL       = "Powder Mill"
+    ARMS_FACTORY      = "Arms Factory"
+    PHARMACEUTICAL_PLANT = "Pharmaceutical Plant"
+
+
+# ---------------------------------------------------------------------------
+# Building configuration
+# ---------------------------------------------------------------------------
+
+DAYS_PER_MONTH: int = 30
+
+
+@dataclass(frozen=True)
+class BuildingConfig:
+    """
+    Immutable specification for one building type.
+
+    Parameters
+    ----------
+    building_type            : BuildingType
+    tier                     : BuildingTier
+    allowed_resources        : frozenset[str] — Tier 1 resources this building can extract.
+                               Empty for Tier 2 buildings.
+    construction_months      : int — construction duration in in-game months.
+    construction_cost_gold   : float — one-time gold cost to start construction.
+    daily_income             : float — gold added to treasury each in-game day once built.
+    monthly_production       : int — units produced each in-game month.
+    production_resource      : str | None — resource produced. None if production
+                               depends on the province resource (Precious Mine gold).
+    production_unit          : str — descriptive unit label (tons, barrels, horses…).
+    gold_to_treasury_monthly : float — gold deposited to treasury monthly (Precious Mine gold).
+    """
+    building_type:           BuildingType
+    tier:                    BuildingTier
+    allowed_resources:       frozenset[str]
+    construction_months:     int
+    construction_cost_gold:  float
+    daily_income:            float
+    monthly_production:      int
+    production_resource:     str | None     # None for gold branch of Precious Mine
+    production_unit:         str
+    gold_to_treasury_monthly: float = 0.0  # Only Precious Mine (gold resource) uses this
+
+    @property
+    def construction_days(self) -> int:
+        """Construction duration in in-game days."""
+        return self.construction_months * DAYS_PER_MONTH
+
+    @property
+    def is_tier1(self) -> bool:
+        return self.tier == BuildingTier.TIER1
+
+    @property
+    def is_tier2(self) -> bool:
+        return self.tier == BuildingTier.TIER2
+
+    def can_be_built_on(self, province_resource: str) -> bool:
+        """
+        Return True if this building may be constructed in a province
+        whose natural resource is ``province_resource``.
+        Tier 2 buildings always return True (province resource is irrelevant).
+        """
+        if self.is_tier2:
+            return True
+        return province_resource in self.allowed_resources
+
+
+# ---------------------------------------------------------------------------
+# Building catalogue
+# ---------------------------------------------------------------------------
+
+BUILDING_CONFIGS: dict[BuildingType, BuildingConfig] = {
+
+    # ------------------------------------------------------------------ Tier 1
+    BuildingType.MINE: BuildingConfig(
+        building_type          = BuildingType.MINE,
+        tier                   = BuildingTier.TIER1,
+        allowed_resources      = frozenset({"iron", "coal", "copper", "stone"}),
+        construction_months    = 3,
+        construction_cost_gold = 60.0,
+        daily_income           = 0.5,
+        monthly_production     = 10,
+        production_resource    = None,   # resolved from province resource at build time
+        production_unit        = "tons",
+    ),
+
+    BuildingType.LOGGING_CAMP: BuildingConfig(
+        building_type          = BuildingType.LOGGING_CAMP,
+        tier                   = BuildingTier.TIER1,
+        allowed_resources      = frozenset({"wood", "rubber"}),
+        construction_months    = 4,
+        construction_cost_gold = 80.0,
+        daily_income           = 0.3,
+        monthly_production     = 5,
+        production_resource    = None,
+        production_unit        = "logs",
+    ),
+
+    BuildingType.FARM: BuildingConfig(
+        building_type          = BuildingType.FARM,
+        tier                   = BuildingTier.TIER1,
+        allowed_resources      = frozenset({"grain", "meat"}),
+        construction_months    = 3,
+        construction_cost_gold = 45.0,
+        daily_income           = 0.3,
+        monthly_production     = 30,
+        production_resource    = None,
+        production_unit        = "tons",
+    ),
+
+    BuildingType.RANCH: BuildingConfig(
+        building_type          = BuildingType.RANCH,
+        tier                   = BuildingTier.TIER1,
+        allowed_resources      = frozenset({"horses"}),
+        construction_months    = 8,
+        construction_cost_gold = 70.0,
+        daily_income           = 0.5,
+        monthly_production     = 300,
+        production_resource    = "horses",
+        production_unit        = "horses",
+    ),
+
+    BuildingType.PLANTATION: BuildingConfig(
+        building_type          = BuildingType.PLANTATION,
+        tier                   = BuildingTier.TIER1,
+        allowed_resources      = frozenset({"cotton"}),
+        construction_months    = 12,
+        construction_cost_gold = 75.0,
+        daily_income           = 0.5,
+        monthly_production     = 20,
+        production_resource    = "cotton",
+        production_unit        = "tons",
+    ),
+
+    BuildingType.OIL_RIG: BuildingConfig(
+        building_type          = BuildingType.OIL_RIG,
+        tier                   = BuildingTier.TIER1,
+        allowed_resources      = frozenset({"oil"}),
+        construction_months    = 18,
+        construction_cost_gold = 150.0,
+        daily_income           = 1.5,
+        monthly_production     = 30,
+        production_resource    = "oil",
+        production_unit        = "barrels",
+    ),
+
+    BuildingType.PRECIOUS_MINE: BuildingConfig(
+        building_type            = BuildingType.PRECIOUS_MINE,
+        tier                     = BuildingTier.TIER1,
+        allowed_resources        = frozenset({"gold", "gems"}),
+        construction_months      = 18,
+        construction_cost_gold   = 100.0,
+        daily_income             = 2.5,
+        monthly_production       = 10,  # gems branch; gold branch uses gold_to_treasury_monthly
+        production_resource      = "gems",  # default; gold branch is handled separately
+        production_unit          = "gems",
+        gold_to_treasury_monthly = 25.0,  # only used when province_resource == "gold"
+    ),
+
+    # ------------------------------------------------------------------ Tier 2
+    BuildingType.TEXTILE_MILL: BuildingConfig(
+        building_type          = BuildingType.TEXTILE_MILL,
+        tier                   = BuildingTier.TIER2,
+        allowed_resources      = frozenset(),
+        construction_months    = 6,
+        construction_cost_gold = 50.0,
+        daily_income           = 1.0,
+        monthly_production     = 5,
+        production_resource    = "textiles",
+        production_unit        = "tons",
+    ),
+
+    BuildingType.CHEMICAL_PLANT: BuildingConfig(
+        building_type          = BuildingType.CHEMICAL_PLANT,
+        tier                   = BuildingTier.TIER2,
+        allowed_resources      = frozenset(),
+        construction_months    = 18,
+        construction_cost_gold = 150.0,
+        daily_income           = 0.5,
+        monthly_production     = 5,
+        production_resource    = "chemicals",
+        production_unit        = "tons",
+    ),
+
+    BuildingType.POWDER_MILL: BuildingConfig(
+        building_type          = BuildingType.POWDER_MILL,
+        tier                   = BuildingTier.TIER2,
+        allowed_resources      = frozenset(),
+        construction_months    = 8,
+        construction_cost_gold = 100.0,
+        daily_income           = 0.3,
+        monthly_production     = 15,
+        production_resource    = "gunpowder",
+        production_unit        = "tons",
+    ),
+
+    BuildingType.ARMS_FACTORY: BuildingConfig(
+        building_type          = BuildingType.ARMS_FACTORY,
+        tier                   = BuildingTier.TIER2,
+        allowed_resources      = frozenset(),
+        construction_months    = 6,
+        construction_cost_gold = 60.0,
+        daily_income           = 0.2,
+        monthly_production     = 50,
+        production_resource    = "ammunition",
+        production_unit        = "stacks",
+    ),
+
+    BuildingType.PHARMACEUTICAL_PLANT: BuildingConfig(
+        building_type          = BuildingType.PHARMACEUTICAL_PLANT,
+        tier                   = BuildingTier.TIER2,
+        allowed_resources      = frozenset(),
+        construction_months    = 3,
+        construction_cost_gold = 45.0,
+        daily_income           = 0.2,
+        monthly_production     = 50,
+        production_resource    = "medicines",
+        production_unit        = "stacks",
+    ),
+}
+
+
+# ---------------------------------------------------------------------------
+# Lookup helpers
+# ---------------------------------------------------------------------------
+
+# Which BuildingType is required for each Tier 1 resource?
+RESOURCE_TO_TIER1_BUILDING: dict[str, BuildingType] = {}
+for _btype, _cfg in BUILDING_CONFIGS.items():
+    for _res in _cfg.allowed_resources:
+        RESOURCE_TO_TIER1_BUILDING[_res] = _btype
+
+# Tier 1 and Tier 2 building type sets
+TIER1_BUILDING_TYPES: frozenset[BuildingType] = frozenset(
+    bt for bt, cfg in BUILDING_CONFIGS.items() if cfg.is_tier1
+)
+TIER2_BUILDING_TYPES: frozenset[BuildingType] = frozenset(
+    bt for bt, cfg in BUILDING_CONFIGS.items() if cfg.is_tier2
+)
+
+
+def get_config(building_type: str | BuildingType) -> BuildingConfig:
+    """
+    Return the BuildingConfig for a given building type name or enum member.
+    Raises ValueError for unrecognised names.
+    """
+    if isinstance(building_type, str):
+        try:
+            building_type = BuildingType(building_type)
+        except ValueError:
+            valid = ", ".join(f"'{b.value}'" for b in BuildingType)
+            raise ValueError(
+                f"Unknown building type '{building_type}'. Valid: {valid}"
+            )
+    return BUILDING_CONFIGS[building_type]
+
+
+def resolve_tier1_production_resource(
+    building_type: BuildingType,
+    province_resource: str,
+) -> str | None:
+    """
+    Determine the storage resource produced by a Tier 1 building given the
+    province's natural resource.
+
+    Returns None for the gold branch of Precious Mine (output goes to treasury).
+    Raises ValueError if the resource is incompatible with the building.
+    """
+    cfg = get_config(building_type)
+    if province_resource not in cfg.allowed_resources:
+        raise ValueError(
+            f"Province resource '{province_resource}' is not compatible "
+            f"with building '{building_type.value}'. "
+            f"Allowed: {sorted(cfg.allowed_resources)}"
+        )
+    if building_type == BuildingType.PRECIOUS_MINE:
+        # Gold → treasury only (no storage entry); gems → storage
+        return None if province_resource == "gold" else "gems"
+    # For all other Tier 1 buildings, the produced resource = province resource
+    return province_resource
