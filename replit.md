@@ -23,6 +23,29 @@ Pure Python backend game logic lives in `game_backend/`. No Discord commands, no
 
 Run the demo: `python3 -m game_backend.demo`
 
+## WW1 Scenario Static Data
+
+Static base data for the WW1 scenario lives in `ww1_economy/seed_ww1.py`. Two
+SQLite tables (defined in `ww1_economy/db.py`) hold it:
+
+| Table | Columns |
+|---|---|
+| `countries` | `server_id, scenario_id, country_id, country_name, total_population` |
+| `provinces` | `server_id, scenario_id, province_id, province_name, owner_country, resource_type, population` |
+
+Both tables are keyed by `(server_id, scenario_id)` for full multi-server / multi-scenario isolation.
+
+- `country_id` is lowercase with underscores (e.g. `russian_empire`).
+- `province_name` is the original base name + zero-padded 3-digit `province_id` (e.g. `Rhineland001`, `East prussia010`, `Rome102`).
+- `population` and `total_population` are stored in absolute people; source values like `5000k` become `5_000_000`.
+- `total_population` per country is computed as the **sum of its province populations** (the stated totals in the source dataset were not always exact and are deliberately ignored).
+- Province ID `025` is intentionally absent from the dataset and therefore from the table.
+
+Re-seed (idempotent — clears and re-inserts the `ww1` scenario rows):
+`python3 -m ww1_economy.seed_ww1`
+
+Override the DB file with `WW1_DB_PATH=/path/to/file.db`. Default is `ww1_scenario.db` in the repo root.
+
 ### Key Design Decisions
 - Time overflows correctly (days → months → years) using flat day-index arithmetic
 - Diplomacy: base relation stored in memory; `get_effective_relation()` adds modifiers dynamically without touching stored value

@@ -76,6 +76,8 @@ class EconomyDB:
         with self._connection() as conn:
             self._create_buildings(conn)
             self._create_country_storage(conn)
+            self._create_countries(conn)
+            self._create_provinces(conn)
 
     # ---- DDL ---------------------------------------------------------
 
@@ -93,6 +95,34 @@ class EconomyDB:
                 construction_end_time    INTEGER NOT NULL DEFAULT 0,
                 is_completed             INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (server_id, scenario_id, province_id, building_type)
+            )
+        """)
+
+    @staticmethod
+    def _create_countries(conn: sqlite3.Connection) -> None:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS countries (
+                server_id        TEXT    NOT NULL,
+                scenario_id      TEXT    NOT NULL,
+                country_id       TEXT    NOT NULL,
+                country_name     TEXT    NOT NULL,
+                total_population INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (server_id, scenario_id, country_id)
+            )
+        """)
+
+    @staticmethod
+    def _create_provinces(conn: sqlite3.Connection) -> None:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS provinces (
+                server_id     TEXT    NOT NULL,
+                scenario_id   TEXT    NOT NULL,
+                province_id   INTEGER NOT NULL,
+                province_name TEXT    NOT NULL,
+                owner_country TEXT    NOT NULL,
+                resource_type TEXT    NOT NULL,
+                population    INTEGER NOT NULL,
+                PRIMARY KEY (server_id, scenario_id, province_id)
             )
         """)
 
@@ -418,6 +448,141 @@ class EconomyDB:
         with self._connection() as conn:
             conn.execute(
                 "DELETE FROM country_storage WHERE server_id=? AND scenario_id=?",
+                (server_id, scenario_id),
+            )
+
+    # ------------------------------------------------------------------
+    # countries — read / write
+    # ------------------------------------------------------------------
+
+    def upsert_country(
+        self,
+        server_id:        str,
+        scenario_id:      str,
+        country_id:       str,
+        country_name:     str,
+        total_population: int,
+    ) -> None:
+        with self._connection() as conn:
+            conn.execute("""
+                INSERT INTO countries
+                    (server_id, scenario_id, country_id, country_name, total_population)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(server_id, scenario_id, country_id)
+                DO UPDATE SET
+                    country_name     = excluded.country_name,
+                    total_population = excluded.total_population
+            """, (server_id, scenario_id, country_id, country_name, total_population))
+
+    def get_country(
+        self, server_id: str, scenario_id: str, country_id: str
+    ) -> dict | None:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM countries "
+                "WHERE server_id=? AND scenario_id=? AND country_id=?",
+                (server_id, scenario_id, country_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_all_countries(
+        self, server_id: str, scenario_id: str
+    ) -> list[dict]:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM countries "
+                "WHERE server_id=? AND scenario_id=? "
+                "ORDER BY country_id",
+                (server_id, scenario_id),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_scenario_countries(
+        self, server_id: str, scenario_id: str
+    ) -> None:
+        with self._connection() as conn:
+            conn.execute(
+                "DELETE FROM countries WHERE server_id=? AND scenario_id=?",
+                (server_id, scenario_id),
+            )
+
+    # ------------------------------------------------------------------
+    # provinces — read / write
+    # ------------------------------------------------------------------
+
+    def upsert_province(
+        self,
+        server_id:     str,
+        scenario_id:   str,
+        province_id:   int,
+        province_name: str,
+        owner_country: str,
+        resource_type: str,
+        population:    int,
+    ) -> None:
+        with self._connection() as conn:
+            conn.execute("""
+                INSERT INTO provinces
+                    (server_id, scenario_id, province_id, province_name,
+                     owner_country, resource_type, population)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(server_id, scenario_id, province_id)
+                DO UPDATE SET
+                    province_name = excluded.province_name,
+                    owner_country = excluded.owner_country,
+                    resource_type = excluded.resource_type,
+                    population    = excluded.population
+            """, (
+                server_id, scenario_id, province_id, province_name,
+                owner_country, resource_type, population,
+            ))
+
+    def get_province(
+        self, server_id: str, scenario_id: str, province_id: int
+    ) -> dict | None:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM provinces "
+                "WHERE server_id=? AND scenario_id=? AND province_id=?",
+                (server_id, scenario_id, province_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_all_provinces(
+        self, server_id: str, scenario_id: str
+    ) -> list[dict]:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM provinces "
+                "WHERE server_id=? AND scenario_id=? "
+                "ORDER BY province_id",
+                (server_id, scenario_id),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_provinces_by_country(
+        self, server_id: str, scenario_id: str, owner_country: str
+    ) -> list[dict]:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM provinces "
+                "WHERE server_id=? AND scenario_id=? AND owner_country=? "
+                "ORDER BY province_id",
+                (server_id, scenario_id, owner_country),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_scenario_provinces(
+        self, server_id: str, scenario_id: str
+    ) -> None:
+        with self._connection() as conn:
+            conn.execute(
+                "DELETE FROM provinces WHERE server_id=? AND scenario_id=?",
                 (server_id, scenario_id),
             )
 
