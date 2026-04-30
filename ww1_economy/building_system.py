@@ -16,8 +16,9 @@ multi-scenario isolation.
 
 from __future__ import annotations
 
-from ww1_economy.db        import EconomyDB
-from ww1_economy.resources import (
+from ww1_economy.db              import EconomyDB
+from ww1_economy.treasury_system import TreasurySystem
+from ww1_economy.resources       import (
     BuildingType,
     BuildingTier,
     BUILDING_CONFIGS,
@@ -55,28 +56,38 @@ class BuildingSystem:
         building_type:    str | BuildingType,
         province_resource: str,
         current_day:      int,
+        treasury:         TreasurySystem | None = None,
     ) -> dict:
         """
         Begin constructing a building in a province.
 
-        Parameters
-        ----------
-        building_type     : The building to construct (name or enum).
-        province_resource : The natural resource of the province (Tier 1 gate).
-        current_day       : Absolute in-game day when construction starts.
+        Construction-cost rules (canonical WW1 economy flow):
+            1. Compute the building cost from BuildingConfig.
+            2. If a TreasurySystem is supplied, atomically check + deduct
+               the cost from the country's treasury.  If the treasury can
+               not cover it, the construction is REJECTED and no row is
+               inserted.  Treasury can never go negative.
+            3. Only after a successful deduction is the building inserted.
+            4. If a validation failure happens AFTER deduction (race-safe),
+               the gold is automatically refunded.
+
+        ``treasury`` is optional ONLY for legacy / low-level smoke tests
+        (e.g. the original ``game_backend/demo.py``).  Every real WW1
+        economy flow MUST pass a TreasurySystem so the spec's "NEVER allow
+        construction without payment" rule is enforced.
 
         Returns a result dict:
-            allowed          : bool
-            reason           : str
-            building_type    : str (if allowed)
-            completion_day   : int (if allowed)
-            cost             : float gold (if allowed)
-
-        Raises ValueError for unknown building types.
-        Does NOT deduct gold — the caller is responsible for paying the cost.
+            allowed         : bool
+            reason          : str
+            building_type   : str   (if allowed)
+            completion_day  : int   (if allowed)
+            cost            : float gold (always)
+            paid            : bool  (True if gold was deducted)
+            treasury_after  : float (post-deduction balance, if paid)
         """
         cfg = get_config(building_type)
         btype = cfg.building_type
+        cost  = float(cfg.construction_cost_gold)
 
         # ---- Validation -----------------------------------------------
 
@@ -92,7 +103,33 @@ class BuildingSystem:
             ok, reason = self._validate_tier2(btype, existing)
 
         if not ok:
-            return {"allowed": False, "reason": reason}
+            return {
+                "allowed": False, "reason": reason,
+                "cost": cost, "paid": False,
+            }
+
+        # ---- Treasury deduction (ATOMIC, never goes negative) ----------
+
+        treasury_after: float | None = None
+        paid: bool = False
+
+        if treasury is not None:
+            success, balance = treasury.deduct(
+                server_id, scenario_id, country_id, cost
+            )
+            if not success:
+                return {
+                    "allowed": False,
+                    "reason":  (
+                        f"Insufficient treasury: '{btype.value}' costs "
+                        f"{cost:.2f} gold, country has {balance:.2f}."
+                    ),
+                    "cost":    cost,
+                    "paid":    False,
+                    "treasury_after": balance,
+                }
+            paid           = True
+            treasury_after = balance
 
         # ---- Resource type stored with the building --------------------
 
@@ -101,22 +138,31 @@ class BuildingSystem:
         else:
             resource_type = None
 
-        # ---- Insert ---------------------------------------------------
+        # ---- Insert (refund on failure) -------------------------------
 
         completion_day = current_day + cfg.construction_days
-        self._db.insert_building(
-            server_id               = server_id,
-            scenario_id             = scenario_id,
-            province_id             = province_id,
-            country_id              = country_id,
-            building_type           = btype.value,
-            resource_type           = resource_type,
-            construction_start_time = current_day,
-            construction_end_time   = completion_day,
-            is_completed            = False,
-        )
+        try:
+            self._db.insert_building(
+                server_id               = server_id,
+                scenario_id             = scenario_id,
+                province_id             = province_id,
+                country_id              = country_id,
+                building_type           = btype.value,
+                resource_type           = resource_type,
+                construction_start_time = current_day,
+                construction_end_time   = completion_day,
+                is_completed            = False,
+            )
+        except Exception:
+            # Race-safe refund: never let the player lose gold for an
+            # insertion error.
+            if paid and treasury is not None:
+                treasury_after = treasury.deposit(
+                    server_id, scenario_id, country_id, cost
+                )
+            raise
 
-        return {
+        result = {
             "allowed":        True,
             "reason":         "Construction started.",
             "building_type":  btype.value,
@@ -125,8 +171,12 @@ class BuildingSystem:
             "resource_type":  resource_type,
             "start_day":      current_day,
             "completion_day": completion_day,
-            "cost":           cfg.construction_cost_gold,
+            "cost":           cost,
+            "paid":           paid,
         }
+        if treasury_after is not None:
+            result["treasury_after"] = treasury_after
+        return result
 
     def complete_construction(
         self,

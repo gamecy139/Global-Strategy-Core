@@ -25,7 +25,7 @@ import sqlite3
 from contextlib import contextmanager
 from typing import Generator
 
-from ww1_economy.resources import STORABLE_RESOURCES
+from ww1_economy.resources import STORABLE_RESOURCES, MARKET_BASE_PRICES
 
 
 # ---------------------------------------------------------------------------
@@ -39,9 +39,32 @@ _BUILDING_COLUMNS: frozenset[str] = frozenset({
     "construction_start_time",
     "construction_end_time",
     "is_completed",
+    "is_active",
 })
 
 _STORAGE_COLUMNS: frozenset[str] = frozenset(STORABLE_RESOURCES)
+
+_COUNTRY_COLUMNS: frozenset[str] = frozenset({
+    "country_name",
+    "total_population",
+    "treasury",
+    "daily_base_income",
+    "tax_multiplier",
+    "economy_efficiency",
+    "war_victory_end_month",
+    "in_active_war",
+    "population_opinion",
+    "unrest",
+})
+
+_MARKET_COLUMNS: frozenset[str] = frozenset({
+    "base_price",
+    "current_price",
+    "current_month_demand",
+    "previous_month_demand",
+    "shortage",
+    "shortage_end_month",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -72,12 +95,17 @@ class EconomyDB:
     # ------------------------------------------------------------------
 
     def init(self) -> None:
-        """Create all tables. Safe to call on every startup (idempotent)."""
+        """Create all tables. Safe to call on every startup (idempotent).
+        Also runs in-place migrations to add new columns to existing DB
+        files without losing data."""
         with self._connection() as conn:
             self._create_buildings(conn)
             self._create_country_storage(conn)
             self._create_countries(conn)
             self._create_provinces(conn)
+            self._create_global_market(conn)
+            self._migrate_buildings(conn)
+            self._migrate_countries(conn)
 
     # ---- DDL ---------------------------------------------------------
 
@@ -125,6 +153,53 @@ class EconomyDB:
                 PRIMARY KEY (server_id, scenario_id, province_id)
             )
         """)
+
+    @staticmethod
+    def _create_global_market(conn: sqlite3.Connection) -> None:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS global_market (
+                server_id             TEXT    NOT NULL,
+                scenario_id           TEXT    NOT NULL,
+                resource_name         TEXT    NOT NULL,
+                base_price            REAL    NOT NULL,
+                current_price         REAL    NOT NULL,
+                current_month_demand  INTEGER NOT NULL DEFAULT 0,
+                previous_month_demand INTEGER NOT NULL DEFAULT 0,
+                shortage              INTEGER NOT NULL DEFAULT 0,
+                shortage_end_month    INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (server_id, scenario_id, resource_name)
+            )
+        """)
+
+    # ---- migrations (additive only — never drops or re-types) --------
+
+    @staticmethod
+    def _migrate_buildings(conn: sqlite3.Connection) -> None:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(buildings)")}
+        if "is_active" not in cols:
+            conn.execute(
+                "ALTER TABLE buildings "
+                "ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1"
+            )
+
+    @staticmethod
+    def _migrate_countries(conn: sqlite3.Connection) -> None:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(countries)")}
+        new_cols: list[tuple[str, str]] = [
+            ("treasury",              "REAL    NOT NULL DEFAULT 0.0"),
+            ("daily_base_income",     "REAL    NOT NULL DEFAULT 0.0"),
+            ("tax_multiplier",        "REAL    NOT NULL DEFAULT 1.0"),
+            ("economy_efficiency",    "REAL    NOT NULL DEFAULT 1.0"),
+            ("war_victory_end_month", "INTEGER NOT NULL DEFAULT 0"),
+            ("in_active_war",         "INTEGER NOT NULL DEFAULT 0"),
+            ("population_opinion",    "INTEGER NOT NULL DEFAULT 50"),
+            ("unrest",                "REAL    NOT NULL DEFAULT 0.0"),
+        ]
+        for name, typedef in new_cols:
+            if name not in cols:
+                conn.execute(
+                    f"ALTER TABLE countries ADD COLUMN {name} {typedef}"
+                )
 
     @staticmethod
     def _create_country_storage(conn: sqlite3.Connection) -> None:
@@ -583,6 +658,235 @@ class EconomyDB:
         with self._connection() as conn:
             conn.execute(
                 "DELETE FROM provinces WHERE server_id=? AND scenario_id=?",
+                (server_id, scenario_id),
+            )
+
+    # ------------------------------------------------------------------
+    # countries — economy field updates (treasury, opinion, unrest, etc.)
+    # ------------------------------------------------------------------
+
+    def update_country_fields(
+        self,
+        server_id:   str,
+        scenario_id: str,
+        country_id:  str,
+        **fields,
+    ) -> None:
+        if not fields:
+            return
+        invalid = set(fields) - _COUNTRY_COLUMNS
+        if invalid:
+            raise ValueError(f"Unknown column(s) for countries: {invalid}")
+        set_clause = ", ".join(f"{c}=?" for c in fields)
+        values     = list(fields.values()) + [server_id, scenario_id, country_id]
+        with self._connection() as conn:
+            conn.execute(
+                f"UPDATE countries SET {set_clause} "
+                f"WHERE server_id=? AND scenario_id=? AND country_id=?",
+                values,
+            )
+
+    def deduct_treasury(
+        self,
+        server_id:   str,
+        scenario_id: str,
+        country_id:  str,
+        amount:      float,
+    ) -> tuple[bool, float]:
+        """
+        Atomically deduct ``amount`` from the country's treasury IFF it has
+        enough. Returns ``(success, new_balance)``.
+        Treasury can never go negative — failure leaves the row untouched.
+        """
+        if amount < 0:
+            raise ValueError(f"Deduction amount must be non-negative, got {amount}.")
+        with self._connection() as conn:
+            cur = conn.execute(
+                "UPDATE countries SET treasury = treasury - ? "
+                "WHERE server_id=? AND scenario_id=? AND country_id=? "
+                "AND treasury >= ?",
+                (amount, server_id, scenario_id, country_id, amount),
+            )
+            if cur.rowcount == 0:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute(
+                    "SELECT treasury FROM countries "
+                    "WHERE server_id=? AND scenario_id=? AND country_id=?",
+                    (server_id, scenario_id, country_id),
+                ).fetchone()
+                current = float(row["treasury"]) if row else 0.0
+                return False, current
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT treasury FROM countries "
+                "WHERE server_id=? AND scenario_id=? AND country_id=?",
+                (server_id, scenario_id, country_id),
+            ).fetchone()
+            return True, float(row["treasury"])
+
+    def deposit_treasury(
+        self,
+        server_id:   str,
+        scenario_id: str,
+        country_id:  str,
+        amount:      float,
+    ) -> float:
+        """Add gold to a country's treasury. Returns the new balance."""
+        if amount < 0:
+            raise ValueError(f"Deposit amount must be non-negative, got {amount}.")
+        with self._connection() as conn:
+            conn.execute(
+                "UPDATE countries SET treasury = treasury + ? "
+                "WHERE server_id=? AND scenario_id=? AND country_id=?",
+                (amount, server_id, scenario_id, country_id),
+            )
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT treasury FROM countries "
+                "WHERE server_id=? AND scenario_id=? AND country_id=?",
+                (server_id, scenario_id, country_id),
+            ).fetchone()
+            return float(row["treasury"]) if row else 0.0
+
+    # ------------------------------------------------------------------
+    # buildings — active / inactive bulk updates
+    # ------------------------------------------------------------------
+
+    def set_buildings_active_for_country(
+        self,
+        server_id:   str,
+        scenario_id: str,
+        country_id:  str,
+        is_active:   bool,
+        building_types: list[str] | None = None,
+    ) -> int:
+        """
+        Bulk-set ``is_active`` for all completed buildings of a country.
+        If ``building_types`` is provided, only buildings of those types
+        are updated.  Returns the number of rows affected.
+        """
+        with self._connection() as conn:
+            if building_types is None:
+                cur = conn.execute(
+                    "UPDATE buildings SET is_active=? "
+                    "WHERE server_id=? AND scenario_id=? "
+                    "AND country_id=? AND is_completed=1",
+                    (int(is_active), server_id, scenario_id, country_id),
+                )
+            else:
+                if not building_types:
+                    return 0
+                placeholders = ",".join("?" * len(building_types))
+                cur = conn.execute(
+                    f"UPDATE buildings SET is_active=? "
+                    f"WHERE server_id=? AND scenario_id=? "
+                    f"AND country_id=? AND is_completed=1 "
+                    f"AND building_type IN ({placeholders})",
+                    [int(is_active), server_id, scenario_id, country_id, *building_types],
+                )
+            return cur.rowcount
+
+    # ------------------------------------------------------------------
+    # global_market — read / write
+    # ------------------------------------------------------------------
+
+    def init_market_prices(
+        self,
+        server_id:   str,
+        scenario_id: str,
+        prices:      dict[str, float] | None = None,
+    ) -> None:
+        """Insert one row per market resource using base prices.
+        Existing rows are left untouched (idempotent)."""
+        prices = prices or MARKET_BASE_PRICES
+        with self._connection() as conn:
+            for resource, base in prices.items():
+                conn.execute(
+                    "INSERT OR IGNORE INTO global_market "
+                    "(server_id, scenario_id, resource_name, "
+                    " base_price, current_price) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (server_id, scenario_id, resource, float(base), float(base)),
+                )
+
+    def get_market_resource(
+        self,
+        server_id:    str,
+        scenario_id:  str,
+        resource:     str,
+    ) -> dict | None:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM global_market "
+                "WHERE server_id=? AND scenario_id=? AND resource_name=?",
+                (server_id, scenario_id, resource),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_all_market(
+        self, server_id: str, scenario_id: str
+    ) -> list[dict]:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM global_market "
+                "WHERE server_id=? AND scenario_id=? "
+                "ORDER BY resource_name",
+                (server_id, scenario_id),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_market_fields(
+        self,
+        server_id:   str,
+        scenario_id: str,
+        resource:    str,
+        **fields,
+    ) -> None:
+        if not fields:
+            return
+        invalid = set(fields) - _MARKET_COLUMNS
+        if invalid:
+            raise ValueError(f"Unknown column(s) for global_market: {invalid}")
+        set_clause = ", ".join(f"{c}=?" for c in fields)
+        values     = list(fields.values()) + [server_id, scenario_id, resource]
+        with self._connection() as conn:
+            conn.execute(
+                f"UPDATE global_market SET {set_clause} "
+                f"WHERE server_id=? AND scenario_id=? AND resource_name=?",
+                values,
+            )
+
+    def increment_market_demand(
+        self,
+        server_id:   str,
+        scenario_id: str,
+        resource:    str,
+        quantity:    int,
+    ) -> int:
+        """Atomically add ``quantity`` to current_month_demand and return new value."""
+        with self._connection() as conn:
+            conn.execute(
+                "UPDATE global_market "
+                "SET current_month_demand = current_month_demand + ? "
+                "WHERE server_id=? AND scenario_id=? AND resource_name=?",
+                (quantity, server_id, scenario_id, resource),
+            )
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT current_month_demand FROM global_market "
+                "WHERE server_id=? AND scenario_id=? AND resource_name=?",
+                (server_id, scenario_id, resource),
+            ).fetchone()
+            return int(row["current_month_demand"]) if row else 0
+
+    def delete_scenario_market(
+        self, server_id: str, scenario_id: str
+    ) -> None:
+        with self._connection() as conn:
+            conn.execute(
+                "DELETE FROM global_market WHERE server_id=? AND scenario_id=?",
                 (server_id, scenario_id),
             )
 

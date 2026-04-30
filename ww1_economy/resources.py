@@ -44,20 +44,34 @@ class Tier2Resource(str, Enum):
     MEDICINES   = "medicines"
 
 
-# All resources that can be stored in country_storage (gold is excluded)
+# All resources that can be stored in country_storage.
+#
+# NOTE: gold, gems, horses and textiles are intentionally NOT stored:
+#   * gold  → goes directly to treasury
+#   * gems  → goes directly to treasury (Gems Mine = +30 gold/month)
+#   * horses    → Ranch only contributes daily income; no inventory accrues
+#   * textiles  → Textile Mill only contributes daily income; no inventory accrues
+#
+# We keep the legacy column names in country_storage so we don't break old DB
+# files, but production never writes to them anymore.
 STORABLE_RESOURCES: tuple[str, ...] = (
     "iron", "coal", "copper", "stone",
     "wood", "rubber",
     "grain", "meat",
-    "horses",
+    "horses",        # legacy column — no longer written by production
     "cotton",
     "oil",
-    "gems",
-    "textiles", "chemicals", "gunpowder", "ammunition", "medicines",
+    "gems",          # legacy column — no longer written by production
+    "textiles",      # legacy column — no longer written by production
+    "chemicals", "gunpowder", "ammunition", "medicines",
 )
 
 # Convenience set for fast membership checks
 STORABLE_RESOURCE_SET: frozenset[str] = frozenset(STORABLE_RESOURCES)
+
+# Resources that are produced by buildings but NEVER stored — they only feed
+# the country's daily income (or, for gold/gems, treasury directly).
+NON_STORABLE_PRODUCTS: frozenset[str] = frozenset({"horses", "textiles"})
 
 ALL_RESOURCE_NAMES: frozenset[str] = frozenset(
     r.value for r in Tier1Resource
@@ -342,6 +356,67 @@ def get_config(building_type: str | BuildingType) -> BuildingConfig:
                 f"Unknown building type '{building_type}'. Valid: {valid}"
             )
     return BUILDING_CONFIGS[building_type]
+
+
+# ---------------------------------------------------------------------------
+# Tier 2 monthly resource consumption (shared-pool model)
+# ---------------------------------------------------------------------------
+#
+# The consumption system aggregates these requirements across every completed
+# Tier 2 building of a country.  If the country's storage covers the TOTAL,
+# every Tier 2 building activates for the month.  Otherwise NONE of them do.
+#
+# Tier 1 buildings consume nothing (they extract from raw province resources).
+
+BUILDING_CONSUMPTION: dict[BuildingType, dict[str, int]] = {
+    BuildingType.TEXTILE_MILL:        {"cotton": 5},
+    BuildingType.CHEMICAL_PLANT:      {"oil": 3, "copper": 2},
+    BuildingType.POWDER_MILL:         {"coal": 6, "oil": 2},
+    BuildingType.ARMS_FACTORY:        {"iron": 10, "gunpowder": 5},
+    BuildingType.PHARMACEUTICAL_PLANT: {"chemicals": 2, "rubber": 2},
+}
+
+
+def consumption_for(building_type: str | BuildingType) -> dict[str, int]:
+    """Return the per-month resource requirement dict for a building.
+    Returns ``{}`` for any building type with no consumption (all Tier 1)."""
+    if isinstance(building_type, str):
+        try:
+            building_type = BuildingType(building_type)
+        except ValueError:
+            return {}
+    return dict(BUILDING_CONSUMPTION.get(building_type, {}))
+
+
+# ---------------------------------------------------------------------------
+# Global market base prices
+# ---------------------------------------------------------------------------
+#
+# Used by ww1_economy.market_system.GlobalMarketSystem.  All prices are
+# expressed as gold-per-unit.  The market mutates a per-resource current_price
+# but always remembers this base value for resets and bound checks.
+
+MARKET_BASE_PRICES: dict[str, float] = {
+    # Tier 1 commodities
+    "iron":   6.0,
+    "coal":   5.0,
+    "copper": 7.0,
+    "stone":  3.0,
+    "wood":   4.0,
+    "rubber": 6.0,
+    "grain":  3.0,
+    "meat":   5.0,
+    "cotton": 5.0,
+    "oil":    9.0,
+    # Tier 2 finished goods
+    "chemicals":  12.0,
+    "gunpowder":  14.0,
+    "ammunition": 18.0,
+    "medicines":  16.0,
+}
+
+MARKET_RESOURCES: tuple[str, ...] = tuple(MARKET_BASE_PRICES.keys())
+MARKET_RESOURCE_SET: frozenset[str] = frozenset(MARKET_RESOURCES)
 
 
 def resolve_tier1_production_resource(

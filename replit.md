@@ -46,6 +46,33 @@ Re-seed (idempotent — clears and re-inserts the `ww1` scenario rows):
 
 Override the DB file with `WW1_DB_PATH=/path/to/file.db`. Default is `ww1_scenario.db` in the repo root.
 
+## WW1 Economy Module (`ww1_economy/`)
+
+End-to-end economy backend for the WW1 scenario. All systems are partitioned by
+`(server_id, scenario_id)` and uphold two hard invariants: **treasury never goes
+negative** and **storage never goes negative**.
+
+| File | Purpose |
+|---|---|
+| `db.py` | SQLite layer for `buildings`, `country_storage`, `countries`, `provinces`, `global_market`. Migrations are additive only. |
+| `resources.py` | `Tier1Resource`, `Tier2Resource`, `BuildingType`, `BUILDING_CONFIGS`, `BUILDING_CONSUMPTION` (Tier 2 monthly inputs), `MARKET_BASE_PRICES`, `NON_STORABLE_PRODUCTS={horses, textiles}`. |
+| `storage_system.py` | Add / deduct / set country resource counts. |
+| `treasury_system.py` | Atomic deposit / deduct on country gold. |
+| `building_system.py` | `start_construction()` accepts an optional `TreasurySystem`; when supplied it atomically deducts the gold cost and refunds on insertion failure. |
+| `consumption_system.py` | `ResourceConsumptionSystem.run_monthly()` aggregates per-country requirements, deducts all-or-nothing from storage, and flips every completed building between `is_active=1/0`. |
+| `production_system.py` | Monthly tick. Inactive buildings produce nothing. Horses (Ranch) and textiles (Textile Mill) are income-only — never stored. Precious Mine deposits **+25 gold/month** for gold provinces and **+30 gold/month** for gems provinces directly to the country treasury. |
+| `market_system.py` | Global market with base prices, monthly demand-driven repricing tiers (-5 / 0 / +5 / +10%), bounded 70%–200% of base, shortage detection (rolling demand ≥ 500 over 3 months → 3–6 month shortage that blocks buyers). |
+| `efficiency_system.py` | Pure `compute_efficiency(opinion, unrest, in_active_war, war_victory_bonus_active)` returning a value clamped to **[0.5, 1.3]**. `apply_income_formula(base, tax, eff)` enforces taxation **before** efficiency: `final = base * tax * eff`. |
+| `tick_system.py` | Top-level orchestrator. `daily_tick()` advances construction completions and credits `final_income * days_passed` to every treasury. `monthly_tick()` runs the canonical order: consumption → production → refresh `daily_base_income` → market update → efficiency recompute. |
+| `economy_demo.py` | End-to-end demo exercising all 7 spec parts. Run with `python3 -m ww1_economy.economy_demo`. |
+
+### Canonical monthly order (enforced in `TickSystem.monthly_tick`)
+1. `ResourceConsumptionSystem.run_monthly` — flips activity flags.
+2. `ProductionSystem.run_monthly_production` — only ACTIVE buildings produce; gold/gems → treasury.
+3. Refresh `countries.daily_base_income` from production output.
+4. `GlobalMarketSystem.update_market_monthly` — re-price every resource.
+5. `EconomyEfficiencySystem.recompute_all` — bounded multiplier ready for next month's daily ticks.
+
 ### Key Design Decisions
 - Time overflows correctly (days → months → years) using flat day-index arithmetic
 - Diplomacy: base relation stored in memory; `get_effective_relation()` adds modifiers dynamically without touching stored value
