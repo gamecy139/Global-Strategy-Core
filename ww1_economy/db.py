@@ -66,6 +66,24 @@ _MARKET_COLUMNS: frozenset[str] = frozenset({
     "shortage_end_month",
 })
 
+_MIL_TECH_COLUMNS: frozenset[str] = frozenset({
+    "is_unlocked",
+    "is_researching",
+    "research_start_day",
+    "research_duration_days",
+    "research_end_day",
+})
+
+_TROOP_DEF_COLUMNS: frozenset[str] = frozenset({
+    "category",
+    "required_tech",
+    "population_required",
+    "gold_cost",
+    "recruitment_time_days",
+    "speed_modifier",
+    "battle_points",
+})
+
 
 # ---------------------------------------------------------------------------
 # EconomyDB
@@ -106,6 +124,8 @@ class EconomyDB:
             self._create_global_market(conn)
             self._create_technologies(conn)
             self._create_reforms(conn)
+            self._create_military_technologies(conn)
+            self._create_troop_definitions(conn)
             self._migrate_buildings(conn)
             self._migrate_countries(conn)
 
@@ -1205,6 +1225,273 @@ class EconomyDB:
                 "WHERE server_id=? AND scenario_id=? "
                 "AND country_id=? AND reform_id=?",
                 (server_id, scenario_id, country_id, reform_id),
+            )
+
+    # ------------------------------------------------------------------
+    # military_technologies — DDL + CRUD
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _create_military_technologies(conn: sqlite3.Connection) -> None:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS military_technologies (
+                server_id              TEXT    NOT NULL,
+                scenario_id            TEXT    NOT NULL,
+                country_id             TEXT    NOT NULL,
+                tech_id                TEXT    NOT NULL,
+                is_unlocked            INTEGER NOT NULL DEFAULT 0,
+                is_researching         INTEGER NOT NULL DEFAULT 0,
+                research_start_day     INTEGER NOT NULL DEFAULT 0,
+                research_duration_days INTEGER NOT NULL DEFAULT 0,
+                research_end_day       INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (server_id, scenario_id, country_id, tech_id)
+            )
+        """)
+
+    def upsert_military_technology(
+        self,
+        server_id:              str,
+        scenario_id:            str,
+        country_id:             str,
+        tech_id:                str,
+        is_unlocked:            bool = False,
+        is_researching:         bool = False,
+        research_start_day:     int  = 0,
+        research_duration_days: int  = 0,
+        research_end_day:       int  = 0,
+    ) -> None:
+        with self._connection() as conn:
+            conn.execute("""
+                INSERT INTO military_technologies
+                    (server_id, scenario_id, country_id, tech_id,
+                     is_unlocked, is_researching,
+                     research_start_day, research_duration_days, research_end_day)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(server_id, scenario_id, country_id, tech_id)
+                DO UPDATE SET
+                    is_unlocked            = excluded.is_unlocked,
+                    is_researching         = excluded.is_researching,
+                    research_start_day     = excluded.research_start_day,
+                    research_duration_days = excluded.research_duration_days,
+                    research_end_day       = excluded.research_end_day
+            """, (
+                server_id, scenario_id, country_id, tech_id,
+                int(is_unlocked), int(is_researching),
+                research_start_day, research_duration_days, research_end_day,
+            ))
+
+    def get_military_technology(
+        self,
+        server_id:   str,
+        scenario_id: str,
+        country_id:  str,
+        tech_id:     str,
+    ) -> dict | None:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM military_technologies "
+                "WHERE server_id=? AND scenario_id=? "
+                "AND country_id=? AND tech_id=?",
+                (server_id, scenario_id, country_id, tech_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_military_technologies_for_country(
+        self,
+        server_id:   str,
+        scenario_id: str,
+        country_id:  str,
+    ) -> list[dict]:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM military_technologies "
+                "WHERE server_id=? AND scenario_id=? AND country_id=? "
+                "ORDER BY tech_id",
+                (server_id, scenario_id, country_id),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_active_military_research(
+        self,
+        server_id:   str,
+        scenario_id: str,
+        country_id:  str,
+    ) -> dict | None:
+        """Return the currently-researching military technology row, or None."""
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM military_technologies "
+                "WHERE server_id=? AND scenario_id=? "
+                "AND country_id=? AND is_researching=1",
+                (server_id, scenario_id, country_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_researching_military_techs_for_scenario(
+        self,
+        server_id:   str,
+        scenario_id: str,
+    ) -> list[dict]:
+        """Return all countries' currently-researching military technology rows."""
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM military_technologies "
+                "WHERE server_id=? AND scenario_id=? AND is_researching=1",
+                (server_id, scenario_id),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def complete_military_technology(
+        self,
+        server_id:   str,
+        scenario_id: str,
+        country_id:  str,
+        tech_id:     str,
+    ) -> None:
+        """Mark a military technology as unlocked and clear the researching flag."""
+        with self._connection() as conn:
+            conn.execute(
+                "UPDATE military_technologies "
+                "SET is_unlocked=1, is_researching=0 "
+                "WHERE server_id=? AND scenario_id=? "
+                "AND country_id=? AND tech_id=?",
+                (server_id, scenario_id, country_id, tech_id),
+            )
+
+    def delete_scenario_military_technologies(
+        self, server_id: str, scenario_id: str
+    ) -> None:
+        with self._connection() as conn:
+            conn.execute(
+                "DELETE FROM military_technologies "
+                "WHERE server_id=? AND scenario_id=?",
+                (server_id, scenario_id),
+            )
+
+    # ------------------------------------------------------------------
+    # troop_definitions — DDL + CRUD
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _create_troop_definitions(conn: sqlite3.Connection) -> None:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS troop_definitions (
+                server_id              TEXT    NOT NULL,
+                scenario_id            TEXT    NOT NULL,
+                unit_name              TEXT    NOT NULL,
+                category               TEXT    NOT NULL,
+                required_tech          TEXT    NOT NULL,
+                population_required    INTEGER NOT NULL,
+                gold_cost              REAL    NOT NULL,
+                recruitment_time_days  INTEGER NOT NULL,
+                speed_modifier         REAL    NOT NULL,
+                battle_points          INTEGER NOT NULL,
+                PRIMARY KEY (server_id, scenario_id, unit_name)
+            )
+        """)
+
+    def seed_troop_definition(
+        self,
+        server_id:             str,
+        scenario_id:           str,
+        unit_name:             str,
+        category:              str,
+        required_tech:         str,
+        population_required:   int,
+        gold_cost:             float,
+        recruitment_time_days: int,
+        speed_modifier:        float,
+        battle_points:         int,
+    ) -> None:
+        """Insert a troop definition row if it does not already exist (idempotent)."""
+        with self._connection() as conn:
+            conn.execute("""
+                INSERT OR IGNORE INTO troop_definitions
+                    (server_id, scenario_id, unit_name, category, required_tech,
+                     population_required, gold_cost, recruitment_time_days,
+                     speed_modifier, battle_points)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                server_id, scenario_id, unit_name, category, required_tech,
+                population_required, float(gold_cost), recruitment_time_days,
+                float(speed_modifier), battle_points,
+            ))
+
+    def get_troop_definition(
+        self,
+        server_id:   str,
+        scenario_id: str,
+        unit_name:   str,
+    ) -> dict | None:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM troop_definitions "
+                "WHERE server_id=? AND scenario_id=? AND unit_name=?",
+                (server_id, scenario_id, unit_name),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_all_troop_definitions(
+        self,
+        server_id:   str,
+        scenario_id: str,
+    ) -> list[dict]:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM troop_definitions "
+                "WHERE server_id=? AND scenario_id=? "
+                "ORDER BY category, unit_name",
+                (server_id, scenario_id),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_troop_definitions_by_category(
+        self,
+        server_id:   str,
+        scenario_id: str,
+        category:    str,
+    ) -> list[dict]:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM troop_definitions "
+                "WHERE server_id=? AND scenario_id=? AND category=? "
+                "ORDER BY unit_name",
+                (server_id, scenario_id, category),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_troop_definitions_by_tech(
+        self,
+        server_id:   str,
+        scenario_id: str,
+        tech_id:     str,
+    ) -> list[dict]:
+        """Return all unit definitions that require the given military tech_id."""
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM troop_definitions "
+                "WHERE server_id=? AND scenario_id=? AND required_tech=? "
+                "ORDER BY unit_name",
+                (server_id, scenario_id, tech_id),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_scenario_troop_definitions(
+        self, server_id: str, scenario_id: str
+    ) -> None:
+        with self._connection() as conn:
+            conn.execute(
+                "DELETE FROM troop_definitions "
+                "WHERE server_id=? AND scenario_id=?",
+                (server_id, scenario_id),
             )
 
     # ------------------------------------------------------------------

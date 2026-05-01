@@ -12,9 +12,11 @@ Systems
   ProductionSystem            — monthly production (active-only, gold→treasury)
   GlobalMarketSystem          — buy/sell with shortage + dynamic prices
   EconomyEfficiencySystem     — bounded efficiency multiplier (0.5–1.3)
-  TechnologySystem            — research progression, speed, unlock checks
+  TechnologySystem            — economic research progression, speed, unlock checks
   ReformsSystem               — reform research, unlock, adoption, effects
   TickSystem                  — daily + monthly orchestrator (wires all above)
+  MilitaryTechSystem          — military tech tree research + unit unlock checks
+  TroopDefinitionSystem       — scenario-scoped troop definitions + recruitment gate
 
 Resources
 ---------
@@ -27,10 +29,16 @@ Technology
   BUILDING_TECH_REQUIREMENTS, TECH_GATED_BUILDINGS,
   RESEARCH_SPEED_BONUSES, REFORM_ADOPTION_COST, MAX_ADOPTED_REFORMS
 
+Military Technology
+-------------------
+  MilTechDef, MILITARY_TECH_TREE, UNIT_TECH_REQUIREMENTS, TECH_GATED_UNITS
+  UnitDef, UNIT_DEFINITIONS, UNIT_CATEGORIES
+
 Database
 --------
   EconomyDB — SQLite layer for buildings, country_storage, countries,
-  provinces, global_market, technologies, reforms.
+  provinces, global_market, technologies, reforms,
+  military_technologies, troop_definitions.
 """
 
 from .db                  import EconomyDB
@@ -91,6 +99,28 @@ from .reforms_system      import (
 )
 from .tick_system         import (
     TickSystem, DailyTickReport, MonthlyTickReport, CountryDailyResult,
+)
+from .military_tech_data  import (
+    MilTechDef,
+    MILITARY_TECH_TREE,
+    UNIT_TECH_REQUIREMENTS,
+    TECH_GATED_UNITS,
+)
+from .unit_data           import (
+    UnitDef,
+    UNIT_DEFINITIONS,
+    UNIT_CATEGORIES,
+)
+from .military_tech_system    import (
+    MilitaryTechSystem,
+    StartMilResearchResult,
+    MilResearchCompletionEvent,
+    MilTechStatus,
+)
+from .troop_definition_system import (
+    TroopDefinitionSystem,
+    SeedResult,
+    RecruitmentValidation,
 )
 
 __all__ = [
@@ -160,4 +190,21 @@ __all__ = [
     "apply_income_formula",
     "EFFICIENCY_MIN",
     "EFFICIENCY_MAX",
+    # Military technology data
+    "MilTechDef",
+    "MILITARY_TECH_TREE",
+    "UNIT_TECH_REQUIREMENTS",
+    "TECH_GATED_UNITS",
+    # Unit data
+    "UnitDef",
+    "UNIT_DEFINITIONS",
+    "UNIT_CATEGORIES",
+    # Military systems
+    "MilitaryTechSystem",
+    "StartMilResearchResult",
+    "MilResearchCompletionEvent",
+    "MilTechStatus",
+    "TroopDefinitionSystem",
+    "SeedResult",
+    "RecruitmentValidation",
 ]

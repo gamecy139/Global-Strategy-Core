@@ -46,6 +46,44 @@ Re-seed (idempotent — clears and re-inserts the `ww1` scenario rows):
 
 Override the DB file with `WW1_DB_PATH=/path/to/file.db`. Default is `ww1_scenario.db` in the repo root.
 
+## WW1 Military Technology + Troop Definitions (`ww1_economy/`)
+
+| File | Purpose |
+|---|---|
+| `military_tech_data.py` | Pure static data: `MilTechDef`, `MILITARY_TECH_TREE` (32 techs), `UNIT_TECH_REQUIREMENTS`, `TECH_GATED_UNITS` |
+| `unit_data.py` | Pure static data: `UnitDef`, `UNIT_DEFINITIONS` (26 units across F1/F2/FL1/S1/S2/N1), `UNIT_CATEGORIES` |
+| `military_tech_system.py` | `MilitaryTechSystem`: `start_research()`, `process_completions()`, `is_tech_unlocked()`, `is_unit_recruitable()`, `validate_recruitment()`, `get_researchable_techs()`, `get_status()` |
+| `troop_definition_system.py` | `TroopDefinitionSystem`: `seed_definitions()` (idempotent), `get_unit()`, `get_recruitable_units()`, `validate_recruitment()`, `get_category_summary()` |
+| `military_demo.py` | End-to-end demo for all 8 spec parts. Run with `python3 -m ww1_economy.military_demo`. |
+
+### Military Tech Tree Structure
+
+Root: `pre_industrial_military_doctrine` (1m) → 7 branches:
+1. **Early Infantry**: early_infantry → line_infantry → elite_line_infantry
+2. **Grenadier**: grenadier → elite_grenadier
+3. **Cavalry**: cavalry → heavy_cavalry → elite_cavalry
+4. **Support Units**: support_units → elite_archers, recon_rifleman, cannons → elite_cannons
+5. **Naval**: naval_warfare_doctrine → gunboats, early_battleships → battleships, early_destroyers, light_carriers
+6. **Modern Warfare**: modern_warfare_doctrine → rifleman, early_trench_infantry, mechanised_army → early_tanks, tanks, early_mechanised_infantry, mechanised_infantry, artillery
+7. **Aerial**: aerial_warfare → observation_balloons, early_aviation → early_bombers (requires: early_aviation + observation_balloons + artillery), early_fighters (requires: early_aviation + observation_balloons), light_aircraft
+
+### Military Research Rules
+
+- One active military research per country at a time (separate queue from economic tech/reforms)
+- Prerequisites strictly enforced; multi-prerequisite techs (e.g. Early Bombers) supported
+- Duration is fixed (no speed modifier); `research_duration_days` stored per row
+- Keyed by `(server_id, scenario_id)` — no global data
+
+### Recruitment Gate
+
+`TroopDefinitionSystem.validate_recruitment()` and `MilitaryTechSystem.validate_recruitment()` enforce:
+1. Unit must be seeded (`seed_definitions()` called for the scenario)
+2. Country must have the required military tech unlocked (`is_unlocked=1`)
+
+Run the demo: `python3 -m ww1_economy.military_demo`
+
+---
+
 ## WW1 Economy Module (`ww1_economy/`)
 
 End-to-end economy backend for the WW1 scenario. All systems are partitioned by
