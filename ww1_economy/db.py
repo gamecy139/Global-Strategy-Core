@@ -117,6 +117,7 @@ class EconomyDB:
         Also runs in-place migrations to add new columns to existing DB
         files without losing data."""
         with self._connection() as conn:
+            # Economy core
             self._create_buildings(conn)
             self._create_country_storage(conn)
             self._create_countries(conn)
@@ -124,8 +125,30 @@ class EconomyDB:
             self._create_global_market(conn)
             self._create_technologies(conn)
             self._create_reforms(conn)
+            # Military
             self._create_military_technologies(conn)
             self._create_troop_definitions(conn)
+            # Religion
+            self._create_country_religions(conn)
+            self._create_province_religions(conn)
+            # Diplomacy
+            self._create_relations(conn)
+            self._create_alliances(conn)
+            self._create_alliance_members(conn)
+            # War
+            self._create_wars(conn)
+            self._create_war_participants(conn)
+            # Armies & battle
+            self._create_armies(conn)
+            self._create_army_units(conn)
+            self._create_battles(conn)
+            # Occupation & post-war
+            self._create_province_occupation(conn)
+            self._create_province_cores(conn)
+            self._create_province_religion_conversion(conn)
+            self._create_war_reparations(conn)
+            self._create_puppet_states(conn)
+            # Migrations
             self._migrate_buildings(conn)
             self._migrate_countries(conn)
 
@@ -673,6 +696,52 @@ class EconomyDB:
                 (server_id, scenario_id, owner_country),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def update_province_fields(
+        self,
+        server_id:   str,
+        scenario_id: str,
+        province_id: str,
+        **fields,
+    ) -> None:
+        """Update arbitrary province columns (owner_country, resource_type, etc.)."""
+        allowed = {"owner_country", "province_name", "resource_type", "population"}
+        bad = set(fields) - allowed
+        if bad:
+            raise ValueError(f"Unknown province fields: {bad}")
+        if not fields:
+            return
+        sets = ", ".join(f"{k}=?" for k in fields)
+        with self._connection() as conn:
+            conn.execute(
+                f"UPDATE provinces SET {sets} "
+                "WHERE server_id=? AND scenario_id=? AND province_id=?",
+                (*fields.values(), server_id, scenario_id, province_id),
+            )
+
+    def update_storage_fields(
+        self,
+        server_id:   str,
+        scenario_id: str,
+        country_id:  str,
+        **fields,
+    ) -> None:
+        """Update multiple storable resource columns at once."""
+        bad = set(fields) - _STORAGE_COLUMNS
+        if bad:
+            raise ValueError(
+                f"Unknown storage columns: {bad}. Valid: {sorted(_STORAGE_COLUMNS)}"
+            )
+        if not fields:
+            return
+        self.get_or_create_storage(server_id, scenario_id, country_id)
+        sets = ", ".join(f"{k}=?" for k in fields)
+        with self._connection() as conn:
+            conn.execute(
+                f"UPDATE country_storage SET {sets} "
+                "WHERE server_id=? AND scenario_id=? AND country_id=?",
+                (*fields.values(), server_id, scenario_id, country_id),
+            )
 
     def delete_scenario_provinces(
         self, server_id: str, scenario_id: str
@@ -1493,6 +1562,1108 @@ class EconomyDB:
                 "WHERE server_id=? AND scenario_id=?",
                 (server_id, scenario_id),
             )
+
+    # ==================================================================
+    # RELIGION — country_religions, province_religions
+    # ==================================================================
+
+    @staticmethod
+    def _create_country_religions(conn: sqlite3.Connection) -> None:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS country_religions (
+                server_id           TEXT    NOT NULL,
+                scenario_id         TEXT    NOT NULL,
+                country_id          TEXT    NOT NULL,
+                religion            TEXT    NOT NULL,
+                persecution_active  INTEGER NOT NULL DEFAULT 0,
+                persecuted_religion TEXT,
+                PRIMARY KEY (server_id, scenario_id, country_id)
+            )
+        """)
+
+    @staticmethod
+    def _create_province_religions(conn: sqlite3.Connection) -> None:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS province_religions (
+                server_id   TEXT NOT NULL,
+                scenario_id TEXT NOT NULL,
+                province_id TEXT NOT NULL,
+                religion    TEXT NOT NULL,
+                PRIMARY KEY (server_id, scenario_id, province_id)
+            )
+        """)
+
+    def upsert_country_religion(
+        self,
+        server_id:   str,
+        scenario_id: str,
+        country_id:  str,
+        religion:    str,
+    ) -> None:
+        with self._connection() as conn:
+            conn.execute("""
+                INSERT INTO country_religions (server_id, scenario_id, country_id, religion)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(server_id, scenario_id, country_id)
+                DO UPDATE SET religion=excluded.religion
+            """, (server_id, scenario_id, country_id, religion))
+
+    def get_country_religion(
+        self, server_id: str, scenario_id: str, country_id: str
+    ) -> dict | None:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM country_religions "
+                "WHERE server_id=? AND scenario_id=? AND country_id=?",
+                (server_id, scenario_id, country_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_all_country_religions(
+        self, server_id: str, scenario_id: str
+    ) -> list[dict]:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM country_religions WHERE server_id=? AND scenario_id=?",
+                (server_id, scenario_id),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_country_religion_fields(
+        self,
+        server_id:   str,
+        scenario_id: str,
+        country_id:  str,
+        **fields,
+    ) -> None:
+        allowed = {"religion", "persecution_active", "persecuted_religion"}
+        bad = set(fields) - allowed
+        if bad:
+            raise ValueError(f"Unknown country_religions fields: {bad}")
+        if not fields:
+            return
+        sets = ", ".join(f"{k}=?" for k in fields)
+        with self._connection() as conn:
+            conn.execute(
+                f"UPDATE country_religions SET {sets} "
+                "WHERE server_id=? AND scenario_id=? AND country_id=?",
+                (*fields.values(), server_id, scenario_id, country_id),
+            )
+
+    def upsert_province_religion(
+        self,
+        server_id:   str,
+        scenario_id: str,
+        province_id: str,
+        religion:    str,
+    ) -> None:
+        with self._connection() as conn:
+            conn.execute("""
+                INSERT INTO province_religions (server_id, scenario_id, province_id, religion)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(server_id, scenario_id, province_id)
+                DO UPDATE SET religion=excluded.religion
+            """, (server_id, scenario_id, province_id, religion))
+
+    def get_province_religion(
+        self, server_id: str, scenario_id: str, province_id: str
+    ) -> dict | None:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM province_religions "
+                "WHERE server_id=? AND scenario_id=? AND province_id=?",
+                (server_id, scenario_id, province_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_all_province_religions(
+        self, server_id: str, scenario_id: str
+    ) -> list[dict]:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM province_religions WHERE server_id=? AND scenario_id=?",
+                (server_id, scenario_id),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ==================================================================
+    # DIPLOMACY — relations, alliances, alliance_members
+    # ==================================================================
+
+    @staticmethod
+    def _create_relations(conn: sqlite3.Connection) -> None:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS relations (
+                server_id    TEXT    NOT NULL,
+                scenario_id  TEXT    NOT NULL,
+                country_a    TEXT    NOT NULL,
+                country_b    TEXT    NOT NULL,
+                base_relation REAL   NOT NULL DEFAULT 50,
+                PRIMARY KEY (server_id, scenario_id, country_a, country_b)
+            )
+        """)
+
+    @staticmethod
+    def _create_alliances(conn: sqlite3.Connection) -> None:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS alliances (
+                alliance_id  TEXT NOT NULL PRIMARY KEY,
+                server_id    TEXT NOT NULL,
+                scenario_id  TEXT NOT NULL,
+                alliance_name TEXT NOT NULL DEFAULT ''
+            )
+        """)
+
+    @staticmethod
+    def _create_alliance_members(conn: sqlite3.Connection) -> None:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS alliance_members (
+                alliance_id TEXT NOT NULL,
+                country_id  TEXT NOT NULL,
+                server_id   TEXT NOT NULL,
+                scenario_id TEXT NOT NULL,
+                PRIMARY KEY (alliance_id, country_id)
+            )
+        """)
+
+    def _canonical_pair(self, a: str, b: str) -> tuple[str, str]:
+        return (a, b) if a <= b else (b, a)
+
+    def upsert_relation(
+        self,
+        server_id:    str,
+        scenario_id:  str,
+        country_a:    str,
+        country_b:    str,
+        base_relation: float,
+    ) -> None:
+        ca, cb = self._canonical_pair(country_a, country_b)
+        with self._connection() as conn:
+            conn.execute("""
+                INSERT INTO relations (server_id, scenario_id, country_a, country_b, base_relation)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(server_id, scenario_id, country_a, country_b)
+                DO UPDATE SET base_relation=excluded.base_relation
+            """, (server_id, scenario_id, ca, cb, float(base_relation)))
+
+    def get_relation(
+        self,
+        server_id:   str,
+        scenario_id: str,
+        country_a:   str,
+        country_b:   str,
+    ) -> dict | None:
+        ca, cb = self._canonical_pair(country_a, country_b)
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM relations "
+                "WHERE server_id=? AND scenario_id=? AND country_a=? AND country_b=?",
+                (server_id, scenario_id, ca, cb),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def adjust_base_relation(
+        self,
+        server_id:   str,
+        scenario_id: str,
+        country_a:   str,
+        country_b:   str,
+        delta:       float,
+    ) -> float:
+        """Add delta to base_relation, clamped to [0, 100]. Returns new value."""
+        ca, cb = self._canonical_pair(country_a, country_b)
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT base_relation FROM relations "
+                "WHERE server_id=? AND scenario_id=? AND country_a=? AND country_b=?",
+                (server_id, scenario_id, ca, cb),
+            ).fetchone()
+            current = float(row["base_relation"]) if row else 50.0
+            new_val = max(0.0, min(100.0, current + delta))
+            conn.execute("""
+                INSERT INTO relations (server_id, scenario_id, country_a, country_b, base_relation)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(server_id, scenario_id, country_a, country_b)
+                DO UPDATE SET base_relation=excluded.base_relation
+            """, (server_id, scenario_id, ca, cb, new_val))
+        return new_val
+
+    def get_all_relations(
+        self, server_id: str, scenario_id: str
+    ) -> list[dict]:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM relations WHERE server_id=? AND scenario_id=?",
+                (server_id, scenario_id),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def insert_alliance(
+        self,
+        alliance_id:   str,
+        server_id:     str,
+        scenario_id:   str,
+        alliance_name: str = "",
+    ) -> None:
+        with self._connection() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO alliances "
+                "(alliance_id, server_id, scenario_id, alliance_name) "
+                "VALUES (?, ?, ?, ?)",
+                (alliance_id, server_id, scenario_id, alliance_name),
+            )
+
+    def get_alliance(self, alliance_id: str) -> dict | None:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM alliances WHERE alliance_id=?",
+                (alliance_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def delete_alliance(self, alliance_id: str) -> None:
+        with self._connection() as conn:
+            conn.execute(
+                "DELETE FROM alliance_members WHERE alliance_id=?",
+                (alliance_id,),
+            )
+            conn.execute(
+                "DELETE FROM alliances WHERE alliance_id=?",
+                (alliance_id,),
+            )
+
+    def add_alliance_member(
+        self,
+        alliance_id: str,
+        country_id:  str,
+        server_id:   str,
+        scenario_id: str,
+    ) -> None:
+        with self._connection() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO alliance_members "
+                "(alliance_id, country_id, server_id, scenario_id) "
+                "VALUES (?, ?, ?, ?)",
+                (alliance_id, country_id, server_id, scenario_id),
+            )
+
+    def remove_alliance_member(self, alliance_id: str, country_id: str) -> None:
+        with self._connection() as conn:
+            conn.execute(
+                "DELETE FROM alliance_members "
+                "WHERE alliance_id=? AND country_id=?",
+                (alliance_id, country_id),
+            )
+
+    def get_alliance_members(self, alliance_id: str) -> list[str]:
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT country_id FROM alliance_members WHERE alliance_id=?",
+                (alliance_id,),
+            ).fetchall()
+        return [r[0] for r in rows]
+
+    def get_country_alliances(
+        self, server_id: str, scenario_id: str, country_id: str
+    ) -> list[dict]:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT a.* FROM alliances a "
+                "JOIN alliance_members m ON a.alliance_id=m.alliance_id "
+                "WHERE a.server_id=? AND a.scenario_id=? AND m.country_id=?",
+                (server_id, scenario_id, country_id),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_scenario_alliances(
+        self, server_id: str, scenario_id: str
+    ) -> list[dict]:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM alliances WHERE server_id=? AND scenario_id=?",
+                (server_id, scenario_id),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ==================================================================
+    # WARS — wars, war_participants
+    # ==================================================================
+
+    @staticmethod
+    def _create_wars(conn: sqlite3.Connection) -> None:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS wars (
+                war_id               TEXT NOT NULL PRIMARY KEY,
+                server_id            TEXT NOT NULL,
+                scenario_id          TEXT NOT NULL,
+                attacker             TEXT NOT NULL,
+                defender             TEXT NOT NULL,
+                start_day            INTEGER NOT NULL DEFAULT 0,
+                status               TEXT NOT NULL DEFAULT 'active',
+                war_score_attacker   REAL NOT NULL DEFAULT 50,
+                war_score_defender   REAL NOT NULL DEFAULT 50,
+                ceasefire_requested_by TEXT,
+                ceasefire_accepted   INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+
+    @staticmethod
+    def _create_war_participants(conn: sqlite3.Connection) -> None:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS war_participants (
+                war_id     TEXT NOT NULL,
+                country_id TEXT NOT NULL,
+                side       TEXT NOT NULL,
+                is_leader  INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (war_id, country_id)
+            )
+        """)
+
+    def insert_war(
+        self,
+        war_id:      str,
+        server_id:   str,
+        scenario_id: str,
+        attacker:    str,
+        defender:    str,
+        start_day:   int,
+    ) -> None:
+        with self._connection() as conn:
+            conn.execute("""
+                INSERT INTO wars
+                    (war_id, server_id, scenario_id, attacker, defender,
+                     start_day, status, war_score_attacker, war_score_defender)
+                VALUES (?, ?, ?, ?, ?, ?, 'active', 50, 50)
+            """, (war_id, server_id, scenario_id, attacker, defender, start_day))
+
+    def get_war(self, war_id: str) -> dict | None:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM wars WHERE war_id=?", (war_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_active_wars(self, server_id: str, scenario_id: str) -> list[dict]:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM wars "
+                "WHERE server_id=? AND scenario_id=? AND status='active'",
+                (server_id, scenario_id),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_country_active_wars(
+        self, server_id: str, scenario_id: str, country_id: str
+    ) -> list[dict]:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute("""
+                SELECT w.* FROM wars w
+                LEFT JOIN war_participants wp ON w.war_id=wp.war_id
+                WHERE w.server_id=? AND w.scenario_id=? AND w.status='active'
+                AND (w.attacker=? OR w.defender=? OR wp.country_id=?)
+            """, (server_id, scenario_id, country_id, country_id, country_id)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_war_fields(self, war_id: str, **fields) -> None:
+        allowed = {
+            "status", "war_score_attacker", "war_score_defender",
+            "ceasefire_requested_by", "ceasefire_accepted",
+        }
+        bad = set(fields) - allowed
+        if bad:
+            raise ValueError(f"Unknown war fields: {bad}")
+        if not fields:
+            return
+        sets = ", ".join(f"{k}=?" for k in fields)
+        with self._connection() as conn:
+            conn.execute(
+                f"UPDATE wars SET {sets} WHERE war_id=?",
+                (*fields.values(), war_id),
+            )
+
+    def insert_war_participant(
+        self,
+        war_id:     str,
+        country_id: str,
+        side:       str,
+        is_leader:  bool = False,
+    ) -> None:
+        with self._connection() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO war_participants "
+                "(war_id, country_id, side, is_leader) VALUES (?, ?, ?, ?)",
+                (war_id, country_id, side, int(is_leader)),
+            )
+
+    def get_war_participants(self, war_id: str) -> list[dict]:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM war_participants WHERE war_id=?", (war_id,)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def remove_war_participant(self, war_id: str, country_id: str) -> None:
+        with self._connection() as conn:
+            conn.execute(
+                "DELETE FROM war_participants WHERE war_id=? AND country_id=?",
+                (war_id, country_id),
+            )
+
+    # ==================================================================
+    # ARMIES — armies, army_units
+    # ==================================================================
+
+    @staticmethod
+    def _create_armies(conn: sqlite3.Connection) -> None:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS armies (
+                army_id                 TEXT NOT NULL PRIMARY KEY,
+                server_id               TEXT NOT NULL,
+                scenario_id             TEXT NOT NULL,
+                country_id              TEXT NOT NULL,
+                province_id             TEXT NOT NULL,
+                state                   TEXT NOT NULL DEFAULT 'idle',
+                strength_pct            REAL NOT NULL DEFAULT 100.0,
+                base_province_id        TEXT NOT NULL,
+                last_supply_day         INTEGER NOT NULL DEFAULT 0,
+                destination_province_id TEXT,
+                movement_start_day      INTEGER,
+                movement_end_day        INTEGER,
+                provinces_traversed     INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+
+    @staticmethod
+    def _create_army_units(conn: sqlite3.Connection) -> None:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS army_units (
+                army_unit_id TEXT NOT NULL PRIMARY KEY,
+                army_id      TEXT NOT NULL,
+                unit_name    TEXT NOT NULL,
+                quantity     INTEGER NOT NULL DEFAULT 0,
+                server_id    TEXT NOT NULL,
+                scenario_id  TEXT NOT NULL,
+                UNIQUE (army_id, unit_name)
+            )
+        """)
+
+    def insert_army(
+        self,
+        army_id:         str,
+        server_id:       str,
+        scenario_id:     str,
+        country_id:      str,
+        province_id:     str,
+        base_province_id: str,
+        last_supply_day: int = 0,
+    ) -> None:
+        with self._connection() as conn:
+            conn.execute("""
+                INSERT INTO armies
+                    (army_id, server_id, scenario_id, country_id, province_id,
+                     base_province_id, state, strength_pct, last_supply_day)
+                VALUES (?, ?, ?, ?, ?, ?, 'idle', 100.0, ?)
+            """, (army_id, server_id, scenario_id, country_id, province_id,
+                  base_province_id, last_supply_day))
+
+    def get_army(self, army_id: str) -> dict | None:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM armies WHERE army_id=?", (army_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_armies_in_province(
+        self, server_id: str, scenario_id: str, province_id: str
+    ) -> list[dict]:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM armies "
+                "WHERE server_id=? AND scenario_id=? AND province_id=? "
+                "AND state != 'destroyed'",
+                (server_id, scenario_id, province_id),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_country_armies(
+        self, server_id: str, scenario_id: str, country_id: str
+    ) -> list[dict]:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM armies "
+                "WHERE server_id=? AND scenario_id=? AND country_id=?",
+                (server_id, scenario_id, country_id),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_all_armies(
+        self, server_id: str, scenario_id: str
+    ) -> list[dict]:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM armies WHERE server_id=? AND scenario_id=?",
+                (server_id, scenario_id),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_army_fields(self, army_id: str, **fields) -> None:
+        allowed = {
+            "province_id", "state", "strength_pct", "base_province_id",
+            "last_supply_day", "destination_province_id",
+            "movement_start_day", "movement_end_day", "provinces_traversed",
+            "country_id",
+        }
+        bad = set(fields) - allowed
+        if bad:
+            raise ValueError(f"Unknown army fields: {bad}")
+        if not fields:
+            return
+        sets = ", ".join(f"{k}=?" for k in fields)
+        with self._connection() as conn:
+            conn.execute(
+                f"UPDATE armies SET {sets} WHERE army_id=?",
+                (*fields.values(), army_id),
+            )
+
+    def delete_army(self, army_id: str) -> None:
+        with self._connection() as conn:
+            conn.execute("DELETE FROM army_units WHERE army_id=?", (army_id,))
+            conn.execute("DELETE FROM armies WHERE army_id=?", (army_id,))
+
+    def upsert_army_unit(
+        self,
+        army_unit_id: str,
+        army_id:      str,
+        unit_name:    str,
+        quantity:     int,
+        server_id:    str,
+        scenario_id:  str,
+    ) -> None:
+        with self._connection() as conn:
+            conn.execute("""
+                INSERT INTO army_units
+                    (army_unit_id, army_id, unit_name, quantity, server_id, scenario_id)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(army_id, unit_name)
+                DO UPDATE SET quantity=quantity+excluded.quantity
+            """, (army_unit_id, army_id, unit_name, quantity, server_id, scenario_id))
+
+    def set_army_unit_quantity(
+        self, army_id: str, unit_name: str, quantity: int
+    ) -> None:
+        with self._connection() as conn:
+            conn.execute(
+                "UPDATE army_units SET quantity=? "
+                "WHERE army_id=? AND unit_name=?",
+                (quantity, army_id, unit_name),
+            )
+
+    def get_army_units(self, army_id: str) -> list[dict]:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM army_units WHERE army_id=? AND quantity>0",
+                (army_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def remove_army_unit(self, army_id: str, unit_name: str) -> None:
+        with self._connection() as conn:
+            conn.execute(
+                "DELETE FROM army_units WHERE army_id=? AND unit_name=?",
+                (army_id, unit_name),
+            )
+
+    # ==================================================================
+    # BATTLES — battles
+    # ==================================================================
+
+    @staticmethod
+    def _create_battles(conn: sqlite3.Connection) -> None:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS battles (
+                battle_id       TEXT NOT NULL PRIMARY KEY,
+                war_id          TEXT NOT NULL,
+                server_id       TEXT NOT NULL,
+                scenario_id     TEXT NOT NULL,
+                province_id     TEXT NOT NULL,
+                army_a_id       TEXT NOT NULL,
+                army_b_id       TEXT NOT NULL,
+                start_day       INTEGER NOT NULL,
+                status          TEXT NOT NULL DEFAULT 'active',
+                winner_army_id  TEXT,
+                last_tick_day   INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+
+    def insert_battle(
+        self,
+        battle_id:   str,
+        war_id:      str,
+        server_id:   str,
+        scenario_id: str,
+        province_id: str,
+        army_a_id:   str,
+        army_b_id:   str,
+        start_day:   int,
+    ) -> None:
+        with self._connection() as conn:
+            conn.execute("""
+                INSERT INTO battles
+                    (battle_id, war_id, server_id, scenario_id, province_id,
+                     army_a_id, army_b_id, start_day, status, last_tick_day)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
+            """, (battle_id, war_id, server_id, scenario_id, province_id,
+                  army_a_id, army_b_id, start_day, start_day))
+
+    def get_battle(self, battle_id: str) -> dict | None:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM battles WHERE battle_id=?", (battle_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_active_battles(self, server_id: str, scenario_id: str) -> list[dict]:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM battles "
+                "WHERE server_id=? AND scenario_id=? AND status='active'",
+                (server_id, scenario_id),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_battle_in_province(
+        self, server_id: str, scenario_id: str, province_id: str
+    ) -> dict | None:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM battles "
+                "WHERE server_id=? AND scenario_id=? AND province_id=? AND status='active'",
+                (server_id, scenario_id, province_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def update_battle_fields(self, battle_id: str, **fields) -> None:
+        allowed = {"status", "winner_army_id", "last_tick_day"}
+        bad = set(fields) - allowed
+        if bad:
+            raise ValueError(f"Unknown battle fields: {bad}")
+        if not fields:
+            return
+        sets = ", ".join(f"{k}=?" for k in fields)
+        with self._connection() as conn:
+            conn.execute(
+                f"UPDATE battles SET {sets} WHERE battle_id=?",
+                (*fields.values(), battle_id),
+            )
+
+    # ==================================================================
+    # OCCUPATION — province_occupation
+    # ==================================================================
+
+    @staticmethod
+    def _create_province_occupation(conn: sqlite3.Connection) -> None:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS province_occupation (
+                server_id            TEXT    NOT NULL,
+                scenario_id          TEXT    NOT NULL,
+                province_id          TEXT    NOT NULL,
+                war_id               TEXT    NOT NULL,
+                occupying_country    TEXT    NOT NULL,
+                occupation_start_day INTEGER NOT NULL,
+                is_occupied          INTEGER NOT NULL DEFAULT 0,
+                war_score_awarded    INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (server_id, scenario_id, province_id)
+            )
+        """)
+
+    def upsert_province_occupation(
+        self,
+        server_id:            str,
+        scenario_id:          str,
+        province_id:          str,
+        war_id:               str,
+        occupying_country:    str,
+        occupation_start_day: int,
+        is_occupied:          int = 0,
+        war_score_awarded:    int = 0,
+    ) -> None:
+        with self._connection() as conn:
+            conn.execute("""
+                INSERT INTO province_occupation
+                    (server_id, scenario_id, province_id, war_id, occupying_country,
+                     occupation_start_day, is_occupied, war_score_awarded)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(server_id, scenario_id, province_id)
+                DO UPDATE SET
+                    war_id=excluded.war_id,
+                    occupying_country=excluded.occupying_country,
+                    occupation_start_day=excluded.occupation_start_day,
+                    is_occupied=excluded.is_occupied,
+                    war_score_awarded=excluded.war_score_awarded
+            """, (server_id, scenario_id, province_id, war_id, occupying_country,
+                  occupation_start_day, is_occupied, war_score_awarded))
+
+    def get_province_occupation(
+        self, server_id: str, scenario_id: str, province_id: str
+    ) -> dict | None:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM province_occupation "
+                "WHERE server_id=? AND scenario_id=? AND province_id=?",
+                (server_id, scenario_id, province_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_war_occupations(self, war_id: str) -> list[dict]:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM province_occupation WHERE war_id=?",
+                (war_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_province_occupation_fields(
+        self, server_id: str, scenario_id: str, province_id: str, **fields
+    ) -> None:
+        allowed = {"is_occupied", "war_score_awarded", "occupying_country",
+                   "occupation_start_day", "war_id"}
+        bad = set(fields) - allowed
+        if bad:
+            raise ValueError(f"Unknown occupation fields: {bad}")
+        if not fields:
+            return
+        sets = ", ".join(f"{k}=?" for k in fields)
+        with self._connection() as conn:
+            conn.execute(
+                f"UPDATE province_occupation SET {sets} "
+                "WHERE server_id=? AND scenario_id=? AND province_id=?",
+                (*fields.values(), server_id, scenario_id, province_id),
+            )
+
+    def delete_province_occupation(
+        self, server_id: str, scenario_id: str, province_id: str
+    ) -> None:
+        with self._connection() as conn:
+            conn.execute(
+                "DELETE FROM province_occupation "
+                "WHERE server_id=? AND scenario_id=? AND province_id=?",
+                (server_id, scenario_id, province_id),
+            )
+
+    # ==================================================================
+    # PROVINCE CORES — province_cores
+    # ==================================================================
+
+    @staticmethod
+    def _create_province_cores(conn: sqlite3.Connection) -> None:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS province_cores (
+                server_id           TEXT    NOT NULL,
+                scenario_id         TEXT    NOT NULL,
+                province_id         TEXT    NOT NULL,
+                country_id          TEXT    NOT NULL,
+                is_core             INTEGER NOT NULL DEFAULT 1,
+                conversion_start_day INTEGER,
+                conversion_end_day   INTEGER,
+                PRIMARY KEY (server_id, scenario_id, province_id, country_id)
+            )
+        """)
+
+    def upsert_province_core(
+        self,
+        server_id:            str,
+        scenario_id:          str,
+        province_id:          str,
+        country_id:           str,
+        is_core:              int = 1,
+        conversion_start_day: int | None = None,
+        conversion_end_day:   int | None = None,
+    ) -> None:
+        with self._connection() as conn:
+            conn.execute("""
+                INSERT INTO province_cores
+                    (server_id, scenario_id, province_id, country_id,
+                     is_core, conversion_start_day, conversion_end_day)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(server_id, scenario_id, province_id, country_id)
+                DO UPDATE SET
+                    is_core=excluded.is_core,
+                    conversion_start_day=excluded.conversion_start_day,
+                    conversion_end_day=excluded.conversion_end_day
+            """, (server_id, scenario_id, province_id, country_id,
+                  is_core, conversion_start_day, conversion_end_day))
+
+    def get_province_core(
+        self, server_id: str, scenario_id: str, province_id: str, country_id: str
+    ) -> dict | None:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM province_cores "
+                "WHERE server_id=? AND scenario_id=? "
+                "AND province_id=? AND country_id=?",
+                (server_id, scenario_id, province_id, country_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_pending_core_conversions(
+        self, server_id: str, scenario_id: str
+    ) -> list[dict]:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM province_cores "
+                "WHERE server_id=? AND scenario_id=? AND is_core=0",
+                (server_id, scenario_id),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def count_non_core_provinces(
+        self, server_id: str, scenario_id: str, country_id: str
+    ) -> int:
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM province_cores "
+                "WHERE server_id=? AND scenario_id=? AND country_id=? AND is_core=0",
+                (server_id, scenario_id, country_id),
+            ).fetchone()
+        return row[0] if row else 0
+
+    # ==================================================================
+    # PROVINCE RELIGION CONVERSION — province_religion_conversion
+    # ==================================================================
+
+    @staticmethod
+    def _create_province_religion_conversion(conn: sqlite3.Connection) -> None:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS province_religion_conversion (
+                server_id           TEXT    NOT NULL,
+                scenario_id         TEXT    NOT NULL,
+                province_id         TEXT    NOT NULL,
+                from_religion       TEXT    NOT NULL,
+                to_religion         TEXT    NOT NULL,
+                conversion_start_day INTEGER NOT NULL,
+                conversion_end_day   INTEGER NOT NULL,
+                PRIMARY KEY (server_id, scenario_id, province_id)
+            )
+        """)
+
+    def upsert_province_religion_conversion(
+        self,
+        server_id:           str,
+        scenario_id:         str,
+        province_id:         str,
+        from_religion:       str,
+        to_religion:         str,
+        conversion_start_day: int,
+        conversion_end_day:   int,
+    ) -> None:
+        with self._connection() as conn:
+            conn.execute("""
+                INSERT INTO province_religion_conversion
+                    (server_id, scenario_id, province_id, from_religion,
+                     to_religion, conversion_start_day, conversion_end_day)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(server_id, scenario_id, province_id)
+                DO UPDATE SET
+                    from_religion=excluded.from_religion,
+                    to_religion=excluded.to_religion,
+                    conversion_start_day=excluded.conversion_start_day,
+                    conversion_end_day=excluded.conversion_end_day
+            """, (server_id, scenario_id, province_id, from_religion,
+                  to_religion, conversion_start_day, conversion_end_day))
+
+    def get_province_religion_conversion(
+        self, server_id: str, scenario_id: str, province_id: str
+    ) -> dict | None:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM province_religion_conversion "
+                "WHERE server_id=? AND scenario_id=? AND province_id=?",
+                (server_id, scenario_id, province_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_pending_religion_conversions(
+        self, server_id: str, scenario_id: str
+    ) -> list[dict]:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM province_religion_conversion "
+                "WHERE server_id=? AND scenario_id=?",
+                (server_id, scenario_id),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_province_religion_conversion(
+        self, server_id: str, scenario_id: str, province_id: str
+    ) -> None:
+        with self._connection() as conn:
+            conn.execute(
+                "DELETE FROM province_religion_conversion "
+                "WHERE server_id=? AND scenario_id=? AND province_id=?",
+                (server_id, scenario_id, province_id),
+            )
+
+    # ==================================================================
+    # WAR REPARATIONS — war_reparations
+    # ==================================================================
+
+    @staticmethod
+    def _create_war_reparations(conn: sqlite3.Connection) -> None:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS war_reparations (
+                war_id          TEXT    NOT NULL,
+                loser_country   TEXT    NOT NULL,
+                winner_country  TEXT    NOT NULL,
+                server_id       TEXT    NOT NULL,
+                scenario_id     TEXT    NOT NULL,
+                start_day       INTEGER NOT NULL,
+                end_day         INTEGER NOT NULL,
+                PRIMARY KEY (war_id, loser_country, winner_country)
+            )
+        """)
+
+    def insert_war_reparations(
+        self,
+        war_id:         str,
+        loser_country:  str,
+        winner_country: str,
+        server_id:      str,
+        scenario_id:    str,
+        start_day:      int,
+        end_day:        int,
+    ) -> None:
+        with self._connection() as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO war_reparations
+                    (war_id, loser_country, winner_country, server_id, scenario_id,
+                     start_day, end_day)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (war_id, loser_country, winner_country, server_id, scenario_id,
+                  start_day, end_day))
+
+    def get_active_reparations(
+        self, server_id: str, scenario_id: str, current_day: int
+    ) -> list[dict]:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM war_reparations "
+                "WHERE server_id=? AND scenario_id=? "
+                "AND start_day<=? AND end_day>=?",
+                (server_id, scenario_id, current_day, current_day),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_country_reparations_as_loser(
+        self, server_id: str, scenario_id: str, country_id: str, current_day: int
+    ) -> list[dict]:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM war_reparations "
+                "WHERE server_id=? AND scenario_id=? "
+                "AND loser_country=? AND end_day>=?",
+                (server_id, scenario_id, country_id, current_day),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ==================================================================
+    # PUPPET STATES — puppet_states
+    # ==================================================================
+
+    @staticmethod
+    def _create_puppet_states(conn: sqlite3.Connection) -> None:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS puppet_states (
+                server_id        TEXT NOT NULL,
+                scenario_id      TEXT NOT NULL,
+                puppet_country   TEXT NOT NULL,
+                overlord_country TEXT NOT NULL,
+                PRIMARY KEY (server_id, scenario_id, puppet_country)
+            )
+        """)
+
+    def insert_puppet_state(
+        self,
+        server_id:        str,
+        scenario_id:      str,
+        puppet_country:   str,
+        overlord_country: str,
+    ) -> None:
+        with self._connection() as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO puppet_states
+                    (server_id, scenario_id, puppet_country, overlord_country)
+                VALUES (?, ?, ?, ?)
+            """, (server_id, scenario_id, puppet_country, overlord_country))
+
+    def get_puppet_state(
+        self, server_id: str, scenario_id: str, puppet_country: str
+    ) -> dict | None:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM puppet_states "
+                "WHERE server_id=? AND scenario_id=? AND puppet_country=?",
+                (server_id, scenario_id, puppet_country),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_overlord_puppets(
+        self, server_id: str, scenario_id: str, overlord_country: str
+    ) -> list[dict]:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM puppet_states "
+                "WHERE server_id=? AND scenario_id=? AND overlord_country=?",
+                (server_id, scenario_id, overlord_country),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_puppet_state(
+        self, server_id: str, scenario_id: str, puppet_country: str
+    ) -> None:
+        with self._connection() as conn:
+            conn.execute(
+                "DELETE FROM puppet_states "
+                "WHERE server_id=? AND scenario_id=? AND puppet_country=?",
+                (server_id, scenario_id, puppet_country),
+            )
+
+    def is_puppet(
+        self, server_id: str, scenario_id: str, country_id: str
+    ) -> bool:
+        return self.get_puppet_state(server_id, scenario_id, country_id) is not None
 
     # ------------------------------------------------------------------
     # Internal

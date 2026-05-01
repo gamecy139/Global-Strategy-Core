@@ -17,6 +17,12 @@ Systems
   TickSystem                  — daily + monthly orchestrator (wires all above)
   MilitaryTechSystem          — military tech tree research + unit unlock checks
   TroopDefinitionSystem       — scenario-scoped troop definitions + recruitment gate
+  ReligionSystem              — country/province religions, persecution, diplomacy modifier
+  DiplomacySystem             — bilateral relations, alliances, war declaration gate
+  WarSystem                   — full war lifecycle, war score, post-war spending
+  ArmySystem                  — army CRUD, movement, supply consumption
+  BattleSystem                — battle trigger, proportional damage, retreat/destroy
+  OccupationSystem            — province occupation tracking and war score
 
 Resources
 ---------
@@ -34,11 +40,14 @@ Military Technology
   MilTechDef, MILITARY_TECH_TREE, UNIT_TECH_REQUIREMENTS, TECH_GATED_UNITS
   UnitDef, UNIT_DEFINITIONS, UNIT_CATEGORIES
 
+Religion
+--------
+  Religion, ALL_RELIGIONS, get_religion_modifier, PERSECUTION_PENALTY
+
 Database
 --------
-  EconomyDB — SQLite layer for buildings, country_storage, countries,
-  provinces, global_market, technologies, reforms,
-  military_technologies, troop_definitions.
+  EconomyDB — SQLite layer for all tables (economy, military, religion,
+  diplomacy, war, armies, battles, occupation, post-war).
 """
 
 from .db                  import EconomyDB
@@ -121,6 +130,41 @@ from .troop_definition_system import (
     TroopDefinitionSystem,
     SeedResult,
     RecruitmentValidation,
+)
+from .religion_data       import (
+    Religion,
+    ALL_RELIGIONS,
+    get_religion_modifier,
+    PERSECUTION_PENALTY,
+)
+from .religion_system     import ReligionSystem, ReligionModifierResult
+from .diplomacy_system    import DiplomacySystem, FinalRelationResult, AllianceInfo
+from .war_system          import (
+    WarSystem,
+    DeclareWarResult,
+    WarScoreEvent,
+    CeasefireResult,
+    VictoryResult,
+    SpendResult,
+    WarTickResult,
+)
+from .army_system         import (
+    ArmySystem,
+    ArmyInfo,
+    MoveResult,
+    SupplyResult,
+    MovementCompletionEvent,
+)
+from .battle_system       import (
+    BattleSystem,
+    TriggerBattleResult,
+    BattleTick,
+    BattleProcessResult,
+)
+from .occupation_system   import (
+    OccupationSystem,
+    OccupationEvent,
+    OccupationTickResult,
 )
 
 __all__ = [
@@ -207,4 +251,38 @@ __all__ = [
     "TroopDefinitionSystem",
     "SeedResult",
     "RecruitmentValidation",
+    # Religion
+    "Religion",
+    "ALL_RELIGIONS",
+    "get_religion_modifier",
+    "PERSECUTION_PENALTY",
+    "ReligionSystem",
+    "ReligionModifierResult",
+    # Diplomacy
+    "DiplomacySystem",
+    "FinalRelationResult",
+    "AllianceInfo",
+    # War
+    "WarSystem",
+    "DeclareWarResult",
+    "WarScoreEvent",
+    "CeasefireResult",
+    "VictoryResult",
+    "SpendResult",
+    "WarTickResult",
+    # Army
+    "ArmySystem",
+    "ArmyInfo",
+    "MoveResult",
+    "SupplyResult",
+    "MovementCompletionEvent",
+    # Battle
+    "BattleSystem",
+    "TriggerBattleResult",
+    "BattleTick",
+    "BattleProcessResult",
+    # Occupation
+    "OccupationSystem",
+    "OccupationEvent",
+    "OccupationTickResult",
 ]
