@@ -5,12 +5,14 @@ Wires the entire WW1 economy into one coherent loop.
 
 DAILY TICK (run every in-game day)
 ----------------------------------
+  1. Complete any in-progress building constructions.
+  2. Complete any in-progress technology research.
+  3. Complete any in-progress reform research.
+  4. For every country, calculate final_income and credit treasury.
+
 For every country in the scenario:
-    1. Compute final_income using the canonical formula
-           taxed   = daily_base_income * tax_multiplier
-           final   = taxed             * economy_efficiency
-    2. treasury += final_income
-       (Treasury can never go negative — daily income only adds.)
+    final = daily_base_income * tax_multiplier * economy_efficiency
+    treasury += final * days_passed
 
 MONTHLY TICK (run on each in-game month boundary)
 -------------------------------------------------
@@ -19,21 +21,15 @@ The order below is mandatory.  Every step is keyed by
 
     1. ResourceConsumptionSystem.run_monthly()
          — shared-pool deduction; flips buildings to ACTIVE / INACTIVE.
-    2. (Buildings table now reflects activation state from step 1.)
-    3. ProductionSystem.run_monthly_production()
+    2. ProductionSystem.run_monthly_production()
          — only ACTIVE buildings produce; horses / textiles never stored;
            gold + gems mines deposit gold to treasury directly.
-    4. (Gold from gold/gems mines was already credited inside step 3 when
-       a TreasurySystem is wired in — no extra step needed.)
-    5. GlobalMarketSystem.update_market_monthly(current_month)
+    3. Refresh ``daily_base_income`` from freshly-computed monthly income.
+    4. GlobalMarketSystem.update_market_monthly(current_month)
          — re-prices every resource and starts/ends shortages.
-    6. EconomyEfficiencySystem.recompute_all(current_month)
+    5. EconomyEfficiencySystem.recompute_all(current_month)
          — recomputes the multiplier from opinion / unrest / war state,
            bounded to [0.5, 1.3], ready for next month's daily ticks.
-    7. (Unrest updates and population growth are simple setters on the
-       countries table — the spec lists them as separate gameplay hooks
-       that game logic outside this module is free to call before / after
-       this orchestrator.  No new gameplay system is invented here.)
 
 GLOBAL RULES (enforced everywhere this orchestrator touches):
     • Treasury never goes negative.
@@ -57,6 +53,10 @@ from ww1_economy.market_system       import GlobalMarketSystem, MarketUpdateRepo
 from ww1_economy.efficiency_system   import (
     EconomyEfficiencySystem, EfficiencyResult, apply_income_formula,
 )
+from ww1_economy.technology_system   import (
+    TechnologySystem, ResearchCompletionEvent,
+)
+from ww1_economy.reforms_system      import ReformsSystem, ReformCompletionEvent
 
 
 # ---------------------------------------------------------------------------
@@ -81,7 +81,9 @@ class DailyTickReport:
     server_id:    str
     scenario_id:  str
     days_passed:  int
-    countries:    dict[str, CountryDailyResult] = field(default_factory=dict)
+    countries:             dict[str, CountryDailyResult]   = field(default_factory=dict)
+    tech_completions:      list[ResearchCompletionEvent]   = field(default_factory=list)
+    reform_completions:    list[ReformCompletionEvent]     = field(default_factory=list)
 
     def summary(self) -> dict:
         return {
@@ -91,6 +93,14 @@ class DailyTickReport:
             "countries": {
                 cid: r.__dict__ for cid, r in self.countries.items()
             },
+            "tech_completions": [
+                {"country_id": e.country_id, "tech_id": e.tech_id, "name": e.name}
+                for e in self.tech_completions
+            ],
+            "reform_completions": [
+                {"country_id": e.country_id, "reform_id": e.reform_id, "name": e.name}
+                for e in self.reform_completions
+            ],
         }
 
 
@@ -149,6 +159,8 @@ class TickSystem:
         production:  ProductionSystem,
         market:      GlobalMarketSystem,
         efficiency:  EconomyEfficiencySystem,
+        technology:  TechnologySystem | None = None,
+        reforms:     ReformsSystem    | None = None,
     ) -> None:
         self._db          = db
         self._storage     = storage
@@ -158,6 +170,8 @@ class TickSystem:
         self._production  = production
         self._market      = market
         self._efficiency  = efficiency
+        self._technology  = technology
+        self._reforms     = reforms
 
     # ------------------------------------------------------------------
     # Convenience constructor — wires every subsystem from one db handle.
@@ -172,10 +186,13 @@ class TickSystem:
         production  = ProductionSystem(db, storage, treasury)
         market      = GlobalMarketSystem(db, storage, treasury)
         efficiency  = EconomyEfficiencySystem(db)
+        technology  = TechnologySystem(db)
+        reforms     = ReformsSystem(db, treasury)
         return cls(
             db=db, storage=storage, treasury=treasury,
             buildings=buildings, consumption=consumption,
             production=production, market=market, efficiency=efficiency,
+            technology=technology, reforms=reforms,
         )
 
     # ==================================================================
@@ -198,16 +215,34 @@ class TickSystem:
         if days_passed < 0:
             raise ValueError("days_passed must be non-negative.")
 
-        # 1. Process construction completions through ``current_day``.
+        # 1. Process building construction completions.
         self._buildings.process_completions(server_id, scenario_id, current_day)
 
+        # 2. Process technology research completions.
+        tech_events: list[ResearchCompletionEvent] = []
+        if self._technology is not None:
+            tech_events = self._technology.process_completions(
+                server_id, scenario_id, current_day
+            )
+
+        # 3. Process reform research completions.
+        reform_events: list[ReformCompletionEvent] = []
+        if self._reforms is not None:
+            reform_events = self._reforms.process_completions(
+                server_id, scenario_id, current_day
+            )
+
         report = DailyTickReport(
-            server_id=server_id, scenario_id=scenario_id, days_passed=days_passed
+            server_id         = server_id,
+            scenario_id       = scenario_id,
+            days_passed       = days_passed,
+            tech_completions  = tech_events,
+            reform_completions = reform_events,
         )
         if days_passed == 0:
             return report
 
-        # 2. Walk every country and apply income.
+        # 4. Walk every country and apply income.
         for crow in self._db.get_all_countries(server_id, scenario_id):
             cid    = crow["country_id"]
             base   = float(crow.get("daily_base_income") or 0.0)

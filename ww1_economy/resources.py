@@ -85,6 +85,7 @@ ALL_RESOURCE_NAMES: frozenset[str] = frozenset(
 class BuildingTier(str, Enum):
     TIER1 = "tier1"
     TIER2 = "tier2"
+    INFRA = "infra"   # infrastructure: Hospital, Library, School, University
 
 
 class BuildingType(str, Enum):
@@ -99,11 +100,17 @@ class BuildingType(str, Enum):
     PRECIOUS_MINE     = "Precious Mine"
 
     # Tier 2 — industrial, province-independent
-    TEXTILE_MILL      = "Textile Mill"
-    CHEMICAL_PLANT    = "Chemical Plant"
-    POWDER_MILL       = "Powder Mill"
-    ARMS_FACTORY      = "Arms Factory"
+    TEXTILE_MILL         = "Textile Mill"
+    CHEMICAL_PLANT       = "Chemical Plant"
+    POWDER_MILL          = "Powder Mill"
+    ARMS_FACTORY         = "Arms Factory"
     PHARMACEUTICAL_PLANT = "Pharmaceutical Plant"
+
+    # Infrastructure — requires tech unlock; no monthly consumption; coexist in province
+    HOSPITAL   = "Hospital"
+    LIBRARY    = "Library"
+    SCHOOL     = "School"
+    UNIVERSITY = "University"
 
 
 # ---------------------------------------------------------------------------
@@ -143,6 +150,15 @@ class BuildingConfig:
     production_resource:     str | None     # None for gold branch of Precious Mine
     production_unit:         str
     gold_to_treasury_monthly: float = 0.0  # Only Precious Mine (gold resource) uses this
+    # Resources consumed at construction start (deducted from country_storage).
+    # Stored as tuple-of-pairs to preserve hashability of the frozen dataclass.
+    # Example: (("stone", 25), ("wood", 15))
+    construction_cost_resources: tuple[tuple[str, int], ...] = ()
+
+    @property
+    def construction_resources_dict(self) -> dict[str, int]:
+        """Return construction_cost_resources as a plain dict for convenience."""
+        return dict(self.construction_cost_resources)
 
     @property
     def construction_days(self) -> int:
@@ -156,6 +172,10 @@ class BuildingConfig:
     @property
     def is_tier2(self) -> bool:
         return self.tier == BuildingTier.TIER2
+
+    @property
+    def is_infra(self) -> bool:
+        return self.tier == BuildingTier.INFRA
 
     def can_be_built_on(self, province_resource: str) -> bool:
         """
@@ -320,6 +340,62 @@ BUILDING_CONFIGS: dict[BuildingType, BuildingConfig] = {
         production_resource    = "medicines",
         production_unit        = "stacks",
     ),
+
+    # ------------------------------------------------------------ Infrastructure
+    # Tech requirements are enforced by TechnologySystem via BUILDING_TECH_REQUIREMENTS.
+    # These buildings have no monthly resource consumption and can coexist in a province.
+
+    BuildingType.HOSPITAL: BuildingConfig(
+        building_type               = BuildingType.HOSPITAL,
+        tier                        = BuildingTier.INFRA,
+        allowed_resources           = frozenset(),
+        construction_months         = 4,
+        construction_cost_gold      = 60.0,
+        daily_income                = 0.0,
+        monthly_production          = 0,
+        production_resource         = None,
+        production_unit             = "",
+        construction_cost_resources = (("stone", 25), ("wood", 15)),
+    ),
+
+    BuildingType.LIBRARY: BuildingConfig(
+        building_type               = BuildingType.LIBRARY,
+        tier                        = BuildingTier.INFRA,
+        allowed_resources           = frozenset(),
+        construction_months         = 4,
+        construction_cost_gold      = 40.0,
+        daily_income                = 0.0,
+        monthly_production          = 0,
+        production_resource         = None,
+        production_unit             = "",
+        construction_cost_resources = (("wood", 20), ("stone", 5)),
+    ),
+
+    BuildingType.SCHOOL: BuildingConfig(
+        building_type               = BuildingType.SCHOOL,
+        tier                        = BuildingTier.INFRA,
+        allowed_resources           = frozenset(),
+        construction_months         = 6,
+        construction_cost_gold      = 60.0,
+        daily_income                = 0.0,
+        monthly_production          = 0,
+        production_resource         = None,
+        production_unit             = "",
+        construction_cost_resources = (("stone", 15), ("wood", 15)),
+    ),
+
+    BuildingType.UNIVERSITY: BuildingConfig(
+        building_type               = BuildingType.UNIVERSITY,
+        tier                        = BuildingTier.INFRA,
+        allowed_resources           = frozenset(),
+        construction_months         = 9,
+        construction_cost_gold      = 90.0,
+        daily_income                = 0.0,
+        monthly_production          = 0,
+        production_resource         = None,
+        production_unit             = "",
+        construction_cost_resources = (("wood", 30), ("stone", 20)),
+    ),
 }
 
 
@@ -333,12 +409,15 @@ for _btype, _cfg in BUILDING_CONFIGS.items():
     for _res in _cfg.allowed_resources:
         RESOURCE_TO_TIER1_BUILDING[_res] = _btype
 
-# Tier 1 and Tier 2 building type sets
+# Tier 1, Tier 2, and infrastructure building type sets
 TIER1_BUILDING_TYPES: frozenset[BuildingType] = frozenset(
     bt for bt, cfg in BUILDING_CONFIGS.items() if cfg.is_tier1
 )
 TIER2_BUILDING_TYPES: frozenset[BuildingType] = frozenset(
     bt for bt, cfg in BUILDING_CONFIGS.items() if cfg.is_tier2
+)
+INFRA_BUILDING_TYPES: frozenset[BuildingType] = frozenset(
+    bt for bt, cfg in BUILDING_CONFIGS.items() if cfg.tier == BuildingTier.INFRA
 )
 
 

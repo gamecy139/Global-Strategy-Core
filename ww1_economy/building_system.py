@@ -24,6 +24,7 @@ from ww1_economy.resources       import (
     BUILDING_CONFIGS,
     TIER1_BUILDING_TYPES,
     TIER2_BUILDING_TYPES,
+    INFRA_BUILDING_TYPES,
     DAYS_PER_MONTH,
     get_config,
     resolve_tier1_production_resource,
@@ -57,58 +58,111 @@ class BuildingSystem:
         province_resource: str,
         current_day:      int,
         treasury:         TreasurySystem | None = None,
+        technology=None,   # TechnologySystem | None — import avoided to prevent circular
+        storage=None,      # StorageSystem    | None
     ) -> dict:
         """
         Begin constructing a building in a province.
 
-        Construction-cost rules (canonical WW1 economy flow):
-            1. Compute the building cost from BuildingConfig.
-            2. If a TreasurySystem is supplied, atomically check + deduct
-               the cost from the country's treasury.  If the treasury can
-               not cover it, the construction is REJECTED and no row is
-               inserted.  Treasury can never go negative.
-            3. Only after a successful deduction is the building inserted.
-            4. If a validation failure happens AFTER deduction (race-safe),
-               the gold is automatically refunded.
+        Construction-cost rules (canonical WW1 economy flow)
+        -----------------------------------------------------
+        1. Tech gate check (if ``technology`` supplied): the building must be
+           unlocked by the country's technology tree.  Construction is REJECTED
+           if the required tech is not yet researched.
+        2. Validate placement rules (Tier 1 / Tier 2 / Infra).
+        3. Resource check (if ``storage`` supplied): all materials listed in
+           BuildingConfig.construction_cost_resources must be available.
+           If any are insufficient the construction is REJECTED before any
+           gold is deducted.
+        4. Gold deduction (if ``treasury`` supplied): atomically deduct the
+           construction_cost_gold from the country's treasury.  If the
+           treasury cannot cover it, construction is REJECTED.
+        5. Resource deduction (immediately after gold): resources are deducted
+           from country_storage.  On any insertion failure both gold and
+           resources are refunded (race-safe).
 
-        ``treasury`` is optional ONLY for legacy / low-level smoke tests
-        (e.g. the original ``game_backend/demo.py``).  Every real WW1
-        economy flow MUST pass a TreasurySystem so the spec's "NEVER allow
-        construction without payment" rule is enforced.
+        ``treasury``, ``technology``, and ``storage`` are optional only for
+        legacy / low-level smoke-tests.  All real WW1 economy flows MUST
+        supply all three.
 
         Returns a result dict:
-            allowed         : bool
-            reason          : str
-            building_type   : str   (if allowed)
-            completion_day  : int   (if allowed)
-            cost            : float gold (always)
-            paid            : bool  (True if gold was deducted)
-            treasury_after  : float (post-deduction balance, if paid)
+            allowed              : bool
+            reason               : str
+            building_type        : str    (if allowed)
+            completion_day       : int    (if allowed)
+            cost                 : float  gold cost (always present)
+            paid                 : bool   (True if gold was deducted)
+            treasury_after       : float  (post-deduction balance, if paid)
+            resources_deducted   : dict   (resource → amount deducted, if any)
         """
-        cfg = get_config(building_type)
+        cfg   = get_config(building_type)
         btype = cfg.building_type
         cost  = float(cfg.construction_cost_gold)
+        res_cost: dict[str, int] = cfg.construction_resources_dict
 
-        # ---- Validation -----------------------------------------------
+        # ---- 1. Tech gate check ----------------------------------------
+
+        if technology is not None:
+            if not technology.is_building_unlocked(
+                server_id, scenario_id, country_id, btype.value
+            ):
+                from ww1_economy.tech_data import BUILDING_TECH_REQUIREMENTS
+                required = BUILDING_TECH_REQUIREMENTS.get(btype.value, "unknown")
+                return {
+                    "allowed": False,
+                    "reason": (
+                        f"'{btype.value}' is locked. "
+                        f"Research '{required}' first."
+                    ),
+                    "cost": cost, "paid": False,
+                    "resources_deducted": {},
+                }
+
+        # ---- 2. Placement validation ------------------------------------
 
         existing = self._db.get_buildings_in_province(
             server_id, scenario_id, province_id
         )
 
-        if btype.value in TIER1_BUILDING_TYPES or btype in TIER1_BUILDING_TYPES:
-            ok, reason = self._validate_tier1(
-                btype, province_resource, existing
-            )
+        if btype in TIER1_BUILDING_TYPES:
+            ok, reason = self._validate_tier1(btype, province_resource, existing)
+        elif btype in INFRA_BUILDING_TYPES:
+            ok, reason = self._validate_infra(btype, existing)
         else:
             ok, reason = self._validate_tier2(btype, existing)
 
         if not ok:
             return {
                 "allowed": False, "reason": reason,
-                "cost": cost, "paid": False,
+                "cost": cost, "paid": False, "resources_deducted": {},
             }
 
-        # ---- Treasury deduction (ATOMIC, never goes negative) ----------
+        # ---- 3. Resource availability check (before gold deduction) ----
+
+        if storage is not None and res_cost:
+            shortfalls: dict[str, int] = {}
+            for res, needed in res_cost.items():
+                have = storage.get_resource(
+                    server_id, scenario_id, country_id, res
+                )
+                if have < needed:
+                    shortfalls[res] = needed - have
+            if shortfalls:
+                return {
+                    "allowed": False,
+                    "reason": (
+                        f"Insufficient resources for '{btype.value}': "
+                        + ", ".join(
+                            f"{r} needs {v} more"
+                            for r, v in shortfalls.items()
+                        )
+                    ),
+                    "cost": cost, "paid": False,
+                    "resources_deducted": {},
+                    "shortfalls": shortfalls,
+                }
+
+        # ---- 4. Treasury deduction (ATOMIC, never goes negative) -------
 
         treasury_after: float | None = None
         paid: bool = False
@@ -127,9 +181,20 @@ class BuildingSystem:
                     "cost":    cost,
                     "paid":    False,
                     "treasury_after": balance,
+                    "resources_deducted": {},
                 }
             paid           = True
             treasury_after = balance
+
+        # ---- 5. Resource deduction -------------------------------------
+
+        resources_deducted: dict[str, int] = {}
+        if storage is not None and res_cost:
+            for res, needed in res_cost.items():
+                storage.deduct(
+                    server_id, scenario_id, country_id, res, needed
+                )
+                resources_deducted[res] = needed
 
         # ---- Resource type stored with the building --------------------
 
@@ -138,7 +203,7 @@ class BuildingSystem:
         else:
             resource_type = None
 
-        # ---- Insert (refund on failure) -------------------------------
+        # ---- Insert (refund gold + resources on failure) --------------
 
         completion_day = current_day + cfg.construction_days
         try:
@@ -154,25 +219,28 @@ class BuildingSystem:
                 is_completed            = False,
             )
         except Exception:
-            # Race-safe refund: never let the player lose gold for an
-            # insertion error.
+            # Race-safe refund
             if paid and treasury is not None:
                 treasury_after = treasury.deposit(
                     server_id, scenario_id, country_id, cost
                 )
+            if storage is not None and resources_deducted:
+                for res, amt in resources_deducted.items():
+                    storage.add(server_id, scenario_id, country_id, res, amt)
             raise
 
-        result = {
-            "allowed":        True,
-            "reason":         "Construction started.",
-            "building_type":  btype.value,
-            "province_id":    province_id,
-            "country_id":     country_id,
-            "resource_type":  resource_type,
-            "start_day":      current_day,
-            "completion_day": completion_day,
-            "cost":           cost,
-            "paid":           paid,
+        result: dict = {
+            "allowed":            True,
+            "reason":             "Construction started.",
+            "building_type":      btype.value,
+            "province_id":        province_id,
+            "country_id":         country_id,
+            "resource_type":      resource_type,
+            "start_day":          current_day,
+            "completion_day":     completion_day,
+            "cost":               cost,
+            "paid":               paid,
+            "resources_deducted": resources_deducted,
         }
         if treasury_after is not None:
             result["treasury_after"] = treasury_after
@@ -401,3 +469,22 @@ class BuildingSystem:
                     f"Only one of each Tier 2 building type is allowed per province."
                 )
         return True, "Tier 2 construction allowed."
+
+    @staticmethod
+    def _validate_infra(
+        btype:             BuildingType,
+        existing_buildings: list[dict],
+    ) -> tuple[bool, str]:
+        """
+        Infrastructure buildings (Hospital, Library, School, University):
+        – Multiple DIFFERENT infra types can coexist in the same province.
+        – Only ONE of each infra building TYPE per province.
+        """
+        for row in existing_buildings:
+            if row["building_type"] == btype.value:
+                status = "completed" if row["is_completed"] else "under construction"
+                return False, (
+                    f"Province already has a '{btype.value}' ({status}). "
+                    f"Only one '{btype.value}' per province is allowed."
+                )
+        return True, "Infrastructure construction allowed."

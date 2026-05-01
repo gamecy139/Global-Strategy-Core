@@ -104,6 +104,8 @@ class EconomyDB:
             self._create_countries(conn)
             self._create_provinces(conn)
             self._create_global_market(conn)
+            self._create_technologies(conn)
+            self._create_reforms(conn)
             self._migrate_buildings(conn)
             self._migrate_countries(conn)
 
@@ -888,6 +890,321 @@ class EconomyDB:
             conn.execute(
                 "DELETE FROM global_market WHERE server_id=? AND scenario_id=?",
                 (server_id, scenario_id),
+            )
+
+    # ------------------------------------------------------------------
+    # technologies — DDL + CRUD
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _create_technologies(conn: sqlite3.Connection) -> None:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS technologies (
+                server_id          TEXT    NOT NULL,
+                scenario_id        TEXT    NOT NULL,
+                country_id         TEXT    NOT NULL,
+                tech_id            TEXT    NOT NULL,
+                is_unlocked        INTEGER NOT NULL DEFAULT 0,
+                is_researching     INTEGER NOT NULL DEFAULT 0,
+                research_start_day INTEGER NOT NULL DEFAULT 0,
+                research_end_day   INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (server_id, scenario_id, country_id, tech_id)
+            )
+        """)
+
+    def upsert_technology(
+        self,
+        server_id:          str,
+        scenario_id:        str,
+        country_id:         str,
+        tech_id:            str,
+        is_unlocked:        bool = False,
+        is_researching:     bool = False,
+        research_start_day: int  = 0,
+        research_end_day:   int  = 0,
+    ) -> None:
+        with self._connection() as conn:
+            conn.execute("""
+                INSERT INTO technologies
+                    (server_id, scenario_id, country_id, tech_id,
+                     is_unlocked, is_researching,
+                     research_start_day, research_end_day)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(server_id, scenario_id, country_id, tech_id)
+                DO UPDATE SET
+                    is_unlocked        = excluded.is_unlocked,
+                    is_researching     = excluded.is_researching,
+                    research_start_day = excluded.research_start_day,
+                    research_end_day   = excluded.research_end_day
+            """, (
+                server_id, scenario_id, country_id, tech_id,
+                int(is_unlocked), int(is_researching),
+                research_start_day, research_end_day,
+            ))
+
+    def get_technology(
+        self,
+        server_id:   str,
+        scenario_id: str,
+        country_id:  str,
+        tech_id:     str,
+    ) -> dict | None:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM technologies "
+                "WHERE server_id=? AND scenario_id=? "
+                "AND country_id=? AND tech_id=?",
+                (server_id, scenario_id, country_id, tech_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_technologies_for_country(
+        self,
+        server_id:   str,
+        scenario_id: str,
+        country_id:  str,
+    ) -> list[dict]:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM technologies "
+                "WHERE server_id=? AND scenario_id=? AND country_id=? "
+                "ORDER BY tech_id",
+                (server_id, scenario_id, country_id),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_active_research(
+        self,
+        server_id:   str,
+        scenario_id: str,
+        country_id:  str,
+    ) -> dict | None:
+        """Return the currently-researching technology row, or None."""
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM technologies "
+                "WHERE server_id=? AND scenario_id=? "
+                "AND country_id=? AND is_researching=1",
+                (server_id, scenario_id, country_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_researching_techs_for_scenario(
+        self,
+        server_id:   str,
+        scenario_id: str,
+    ) -> list[dict]:
+        """Return all countries' currently-researching technology rows."""
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM technologies "
+                "WHERE server_id=? AND scenario_id=? AND is_researching=1",
+                (server_id, scenario_id),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def complete_technology(
+        self,
+        server_id:   str,
+        scenario_id: str,
+        country_id:  str,
+        tech_id:     str,
+    ) -> None:
+        """Mark a technology as unlocked and clear the researching flag."""
+        with self._connection() as conn:
+            conn.execute(
+                "UPDATE technologies "
+                "SET is_unlocked=1, is_researching=0 "
+                "WHERE server_id=? AND scenario_id=? "
+                "AND country_id=? AND tech_id=?",
+                (server_id, scenario_id, country_id, tech_id),
+            )
+
+    # ------------------------------------------------------------------
+    # reforms — DDL + CRUD
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _create_reforms(conn: sqlite3.Connection) -> None:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS reforms (
+                server_id          TEXT    NOT NULL,
+                scenario_id        TEXT    NOT NULL,
+                country_id         TEXT    NOT NULL,
+                reform_id          TEXT    NOT NULL,
+                is_unlocked        INTEGER NOT NULL DEFAULT 0,
+                is_adopted         INTEGER NOT NULL DEFAULT 0,
+                is_researching     INTEGER NOT NULL DEFAULT 0,
+                research_start_day INTEGER NOT NULL DEFAULT 0,
+                research_end_day   INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (server_id, scenario_id, country_id, reform_id)
+            )
+        """)
+
+    def upsert_reform(
+        self,
+        server_id:          str,
+        scenario_id:        str,
+        country_id:         str,
+        reform_id:          str,
+        is_unlocked:        bool = False,
+        is_adopted:         bool = False,
+        is_researching:     bool = False,
+        research_start_day: int  = 0,
+        research_end_day:   int  = 0,
+    ) -> None:
+        with self._connection() as conn:
+            conn.execute("""
+                INSERT INTO reforms
+                    (server_id, scenario_id, country_id, reform_id,
+                     is_unlocked, is_adopted, is_researching,
+                     research_start_day, research_end_day)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(server_id, scenario_id, country_id, reform_id)
+                DO UPDATE SET
+                    is_unlocked        = excluded.is_unlocked,
+                    is_adopted         = excluded.is_adopted,
+                    is_researching     = excluded.is_researching,
+                    research_start_day = excluded.research_start_day,
+                    research_end_day   = excluded.research_end_day
+            """, (
+                server_id, scenario_id, country_id, reform_id,
+                int(is_unlocked), int(is_adopted), int(is_researching),
+                research_start_day, research_end_day,
+            ))
+
+    def get_reform(
+        self,
+        server_id:   str,
+        scenario_id: str,
+        country_id:  str,
+        reform_id:   str,
+    ) -> dict | None:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM reforms "
+                "WHERE server_id=? AND scenario_id=? "
+                "AND country_id=? AND reform_id=?",
+                (server_id, scenario_id, country_id, reform_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_reforms_for_country(
+        self,
+        server_id:   str,
+        scenario_id: str,
+        country_id:  str,
+    ) -> list[dict]:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM reforms "
+                "WHERE server_id=? AND scenario_id=? AND country_id=? "
+                "ORDER BY reform_id",
+                (server_id, scenario_id, country_id),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_adopted_reforms(
+        self,
+        server_id:   str,
+        scenario_id: str,
+        country_id:  str,
+    ) -> list[dict]:
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM reforms "
+                "WHERE server_id=? AND scenario_id=? "
+                "AND country_id=? AND is_adopted=1",
+                (server_id, scenario_id, country_id),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_active_reform_research(
+        self,
+        server_id:   str,
+        scenario_id: str,
+        country_id:  str,
+    ) -> dict | None:
+        """Return the currently-researching reform row, or None."""
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM reforms "
+                "WHERE server_id=? AND scenario_id=? "
+                "AND country_id=? AND is_researching=1",
+                (server_id, scenario_id, country_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_researching_reforms_for_scenario(
+        self,
+        server_id:   str,
+        scenario_id: str,
+    ) -> list[dict]:
+        """Return all countries' currently-researching reform rows."""
+        with self._connection() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM reforms "
+                "WHERE server_id=? AND scenario_id=? AND is_researching=1",
+                (server_id, scenario_id),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def complete_reform(
+        self,
+        server_id:   str,
+        scenario_id: str,
+        country_id:  str,
+        reform_id:   str,
+    ) -> None:
+        """Mark a reform as unlocked (but not yet adopted) and clear researching."""
+        with self._connection() as conn:
+            conn.execute(
+                "UPDATE reforms "
+                "SET is_unlocked=1, is_researching=0 "
+                "WHERE server_id=? AND scenario_id=? "
+                "AND country_id=? AND reform_id=?",
+                (server_id, scenario_id, country_id, reform_id),
+            )
+
+    def adopt_reform(
+        self,
+        server_id:   str,
+        scenario_id: str,
+        country_id:  str,
+        reform_id:   str,
+    ) -> None:
+        """Mark a reform as adopted (requires is_unlocked=1 to be valid)."""
+        with self._connection() as conn:
+            conn.execute(
+                "UPDATE reforms SET is_adopted=1 "
+                "WHERE server_id=? AND scenario_id=? "
+                "AND country_id=? AND reform_id=?",
+                (server_id, scenario_id, country_id, reform_id),
+            )
+
+    def unadopt_reform(
+        self,
+        server_id:   str,
+        scenario_id: str,
+        country_id:  str,
+        reform_id:   str,
+    ) -> None:
+        """Remove the adopted flag from a reform."""
+        with self._connection() as conn:
+            conn.execute(
+                "UPDATE reforms SET is_adopted=0 "
+                "WHERE server_id=? AND scenario_id=? "
+                "AND country_id=? AND reform_id=?",
+                (server_id, scenario_id, country_id, reform_id),
             )
 
     # ------------------------------------------------------------------

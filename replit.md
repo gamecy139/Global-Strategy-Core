@@ -58,13 +58,42 @@ negative** and **storage never goes negative**.
 | `resources.py` | `Tier1Resource`, `Tier2Resource`, `BuildingType`, `BUILDING_CONFIGS`, `BUILDING_CONSUMPTION` (Tier 2 monthly inputs), `MARKET_BASE_PRICES`, `NON_STORABLE_PRODUCTS={horses, textiles}`. |
 | `storage_system.py` | Add / deduct / set country resource counts. |
 | `treasury_system.py` | Atomic deposit / deduct on country gold. |
-| `building_system.py` | `start_construction()` accepts an optional `TreasurySystem`; when supplied it atomically deducts the gold cost and refunds on insertion failure. |
-| `consumption_system.py` | `ResourceConsumptionSystem.run_monthly()` aggregates per-country requirements, deducts all-or-nothing from storage, and flips every completed building between `is_active=1/0`. |
+| `building_system.py` | `start_construction()` accepts optional `TreasurySystem`, `TechnologySystem`, `StorageSystem`; enforces tech-gate check, deducts construction resources (stone/wood) from country storage before starting, and refunds both gold and resources on insertion failure. |
+| `consumption_system.py` | `ResourceConsumptionSystem.run_monthly()` aggregates per-country requirements, deducts all-or-nothing from storage, and flips every completed building between `is_active=1/0`. Infra buildings have no monthly consumption. |
 | `production_system.py` | Monthly tick. Inactive buildings produce nothing. Horses (Ranch) and textiles (Textile Mill) are income-only — never stored. Precious Mine deposits **+25 gold/month** for gold provinces and **+30 gold/month** for gems provinces directly to the country treasury. |
 | `market_system.py` | Global market with base prices, monthly demand-driven repricing tiers (-5 / 0 / +5 / +10%), bounded 70%–200% of base, shortage detection (rolling demand ≥ 500 over 3 months → 3–6 month shortage that blocks buyers). |
 | `efficiency_system.py` | Pure `compute_efficiency(opinion, unrest, in_active_war, war_victory_bonus_active)` returning a value clamped to **[0.5, 1.3]**. `apply_income_formula(base, tax, eff)` enforces taxation **before** efficiency: `final = base * tax * eff`. |
-| `tick_system.py` | Top-level orchestrator. `daily_tick()` advances construction completions and credits `final_income * days_passed` to every treasury. `monthly_tick()` runs the canonical order: consumption → production → refresh `daily_base_income` → market update → efficiency recompute. |
-| `economy_demo.py` | End-to-end demo exercising all 7 spec parts. Run with `python3 -m ww1_economy.economy_demo`. |
+| `tech_data.py` | Pure static data: `TECH_TREE` (6 techs), `REFORM_TREE` (8 reforms), `BUILDING_TECH_REQUIREMENTS`, `TECH_GATED_BUILDINGS`, `RESEARCH_SPEED_BONUSES`, `REFORM_ADOPTION_COST=100`, `MAX_ADOPTED_REFORMS=3`. |
+| `technology_system.py` | `TechnologySystem`: `start_research()`, `process_completions()`, `compute_research_speed()` (province infra DR brackets), `is_unlocked()`, `is_building_unlocked()`, shared-queue guard across techs + reforms. |
+| `reforms_system.py` | `ReformsSystem`: `start_research_reform()`, `process_completions()`, `adopt_reform()` (100g, max 3), `unadopt_reform()`, `compute_effects()`, `is_war_declaration_blocked()`. |
+| `tick_system.py` | Top-level orchestrator. `daily_tick()` completes buildings, completes tech research, completes reform research, then credits income. `monthly_tick()` runs: consumption → production → refresh income → market → efficiency. `DailyTickReport` now includes `tech_completions` and `reform_completions`. |
+| `economy_demo.py` | End-to-end demo exercising the original 10 economy spec parts. Run with `python3 -m ww1_economy.economy_demo`. |
+| `tech_demo.py` | End-to-end demo for all 7+1 Technology System spec parts (tech tree, research speed, econ tech, infra tech, reforms, queue, tick integration, invariants). Run with `python3 -m ww1_economy.tech_demo`. |
+
+### Infrastructure Buildings (Tier: INFRA)
+`Hospital`, `Library`, `School`, `University` — no monthly consumption, can coexist in any combination within the same province, require a tech unlock, and deduct stone/wood from `country_storage` at construction start.
+
+| Building | Tech Required | Gold | Stone | Wood |
+|---|---|---|---|---|
+| Hospital | `early_modern_infrastructure` | 60 | 25 | 15 |
+| Library | `early_modern_infrastructure` | 40 | 5 | 20 |
+| School | `library` | 50 | 15 | 15 |
+| University | `school` | 80 | 30 | 10 |
+
+### Research Speed Formula
+`final = clamp(base + infra_bonus + opinion_mod + unrest_mod + war_mod, min=0.5%)`
+- **base**: 1.0%
+- **infra_bonus**: sum of per-province infra building bonuses with diminishing returns (provinces 1–3 → 100%, 4–6 → 50%, 7–10 → 25%, 11+ → 10%). Library=+0.5%, School=+1.0%, University=+2.0%, Hospital=+0.5%.
+- **opinion>80** → +0.5%;  **opinion<30** → -1.5%
+- **unrest>50** → -2.0%
+- **in_active_war AND pre-war speed>3%** → -2.0%
+- `end_day = current_day + int(duration_days / (speed_pct / 100.0))`
+
+### Canonical daily tick order (enforced in `TickSystem.daily_tick`)
+1. Building construction completions.
+2. Technology research completions.
+3. Reform research completions.
+4. Income crediting (`final_income × days_passed` per country).
 
 ### Canonical monthly order (enforced in `TickSystem.monthly_tick`)
 1. `ResourceConsumptionSystem.run_monthly` — flips activity flags.
