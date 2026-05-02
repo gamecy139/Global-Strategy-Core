@@ -31,8 +31,9 @@ RELIGION_EMOJI: dict[str, str] = {
 RESOURCE_EMOJI: dict[str, str] = {
     "coal": "🪨", "iron": "⚙️", "gold": "🪙", "grain": "🌾",
     "meat": "🥩", "wood": "🪵", "oil": "🛢️", "cotton": "🧶",
-    "rubber": "🧪", "copper": "🔶", "horses": "🐎", "stone": "🪨",
-    "gems": "💎",
+    "rubber": "🧪", "copper": "🔶", "horses": "🐎", "stone": "🏔️",
+    "gems": "💎", "textiles": "🧵", "chemicals": "⚗️",
+    "gunpowder": "💣", "ammunition": "🔫", "medicines": "💊",
 }
 
 
@@ -61,16 +62,21 @@ def help_embed() -> discord.Embed:
         COL_GOLD,
     )
     cmds = [
-        ("rp help",                     "Show this help message."),
-        ("rp start",                    "**Admin** — Choose a scenario and begin."),
-        ("rp countries",                "List all playable nations."),
-        ("rp select `<country>`",       "Claim a country."),
-        ("rp my_country / rp mc",       "View your country dashboard with sections."),
-        ("rp speed",                    "**Admin** — View or change game speed."),
-        ("rp invest pg",                "Invest gold to boost population growth."),
-        ("rp storage",                  "View your country's resource storage."),
-        ("rp buildings",                "Browse all constructable buildings."),
-        ("rp construct `<building>`",   "Construct a building in one of your provinces."),
+        ("rp help",                       "Show this help message."),
+        ("rp start",                      "**Admin** — Choose a scenario and begin."),
+        ("rp countries",                  "List all playable nations."),
+        ("rp select `<country>`",         "Claim a country."),
+        ("rp my_country / rp mc",         "View your country dashboard with sections."),
+        ("rp speed",                      "**Admin** — View or change game speed."),
+        ("rp invest pg",                  "Invest gold to boost population growth."),
+        ("rp storage",                    "View your country's resource storage."),
+        ("rp buildings",                  "Browse all constructable buildings."),
+        ("rp construct `<building>`",     "Construct a building in one of your provinces."),
+        ("rp technology",                 "Browse the technology tree and see research speed."),
+        ("rp research `<tech/reform>`",   "Start or resume researching a technology or reform."),
+        ("rp switch_research `<name>`",   "Pause current research and start a new one."),
+        ("rp reforms",                    "View all reforms and their effects."),
+        ("rp adopt `<reform>`",           "Adopt a researched reform (costs 100 gold)."),
     ]
     for name, desc in cmds:
         e.add_field(name=f"`{name}`", value=desc, inline=False)
@@ -165,6 +171,45 @@ def game_started_embed(scenario: str) -> discord.Embed:
     return e
 
 
+# ── rp clear ──────────────────────────────────────────────────────────────────
+
+def clear_confirm_embed() -> discord.Embed:
+    return _base(
+        "⚠️  Reset Entire Game?",
+        (
+            "This will **permanently delete** the ongoing game for this server:\n\n"
+            "• All country assignments will be cleared\n"
+            "• All player selections will be reset\n"
+            "• All investments will be lost\n"
+            "• Game session and tick progress will be wiped\n\n"
+            "**Players will need to use `rp start` and `rp select` again.**\n\n"
+            "Are you sure?"
+        ),
+        COL_RED,
+    )
+
+
+def clear_success_embed() -> discord.Embed:
+    return _base(
+        "🗑️  Game Reset",
+        "The game has been completely reset for this server.\n"
+        "Use **`rp start`** to begin a new game.",
+        COL_GREEN,
+    )
+
+
+def clear_cancelled_embed() -> discord.Embed:
+    return _base("❌  Cancelled", "Game reset cancelled. The game continues.", COL_GREY)
+
+
+def not_authorised_embed(cmd: str) -> discord.Embed:
+    return _base(
+        "🚫  Not Authorised",
+        f"You are not authorised to use **`{cmd}`**.",
+        COL_RED,
+    )
+
+
 # ── rp countries ─────────────────────────────────────────────────────────────
 
 def countries_embed(
@@ -214,12 +259,25 @@ def speed_changed_embed(new_label: str) -> discord.Embed:
 # ── rp my_country ─────────────────────────────────────────────────────────────
 
 def _mc_slim_header(country_name: str, owner: str, date: str) -> str:
-    """Short header for non-overview sections."""
     return f"**{country_name}**\n**Owner:** {owner}  •  **Date:** {date}"
+
+
+def _opinion_emoji(opinion: int) -> str:
+    if opinion >= 80:
+        return "😄"
+    if opinion >= 60:
+        return "😊"
+    if opinion >= 40:
+        return "😐"
+    if opinion >= 20:
+        return "😟"
+    return "😠"
 
 
 def my_country_overview_embed(country: dict, owner: str, date: str) -> discord.Embed:
     rel_emoji = RELIGION_EMOJI.get(country.get("religion", ""), "🏛️")
+    opinion   = country.get("population_opinion", 50)
+    op_emoji  = _opinion_emoji(opinion)
     e = discord.Embed(title=f"🏛️  {country['country_name']}", colour=COL_GOLD)
     e.set_thumbnail(url=THUMB)
     e.add_field(name="Owner",        value=owner,                                         inline=True)
@@ -229,6 +287,7 @@ def my_country_overview_embed(country: dict, owner: str, date: str) -> discord.E
     e.add_field(name="Daily Income", value=f"{country.get('daily_base_income', 0):+.2f} gold/day", inline=True)
     growth = country.get("population_growth_rate", 0.6)
     e.add_field(name="Pop. Growth",  value=f"{growth:.2f}%/month",                        inline=True)
+    e.add_field(name="Pop. Opinion", value=f"{op_emoji} {opinion}/100",                   inline=True)
     e.add_field(
         name="ℹ️  Use the dropdown to explore",
         value="Provinces · Population · Resources · Military · Infrastructure",
@@ -383,21 +442,14 @@ def invest_success_embed(country_name: str, gold_spent: float,
 
 def storage_embed(country_name: str, owner: str, date: str,
                    storage: dict) -> discord.Embed:
-    RESOURCE_EMOJI_LOCAL = {
-        "coal": "🪨", "iron": "⚙️", "gold": "🪙", "grain": "🌾",
-        "meat": "🥩", "wood": "🪵", "oil": "🛢️", "cotton": "🧶",
-        "rubber": "🧪", "copper": "🔶", "horses": "🐎", "stone": "🪨",
-        "gems": "💎", "textiles": "🧵", "chemicals": "⚗️",
-        "gunpowder": "💣", "ammunition": "🔫", "medicines": "💊",
-    }
     header = _mc_slim_header(country_name, owner, date)
     e = discord.Embed(
         title=f"📦  Storage — {country_name}",
-        description=header,
+        description=header + "\n\n*Note: Horses & Textiles give daily income only. Gems & Gold go directly to treasury.*",
         colour=COL_TEAL,
     )
     for res, qty in storage.items():
-        emoji = RESOURCE_EMOJI_LOCAL.get(res, "📦")
+        emoji = RESOURCE_EMOJI.get(res, "📦")
         e.add_field(
             name=f"{emoji}  {res.replace('_',' ').title()}",
             value=f"{qty:,}",
@@ -421,14 +473,26 @@ def buildings_list_embed(tier_label: str, buildings_data: list[dict],
         if b.get("allowed_resources"):
             res_list = ", ".join(b["allowed_resources"])
             res_line = f"\n🔒 **Resource required:** {res_list}"
-        cons_res = b.get("construction_cost_resources", {})
+        cons_res  = b.get("construction_cost_resources", {})
         cons_line = ""
         if cons_res:
             parts = [f"{v} {k}" for k, v in cons_res.items()]
             cons_line = f"\n🧱 **Mats on build:** {', '.join(parts)}"
-        prod = b.get("production_resource") or b.get("gold_to_treasury_monthly")
-        prod_line = f"\n📤 **Monthly prod:** {b['monthly_production']} {b.get('production_unit','')} {('→ ' + prod) if prod else ''}" if b["monthly_production"] > 0 else ""
+        prod      = b.get("production_resource") or b.get("gold_to_treasury_monthly")
+        prod_line = (
+            f"\n📤 **Monthly prod:** {b['monthly_production']} {b.get('production_unit','')} "
+            f"{('→ ' + prod) if prod else ''}"
+            if b["monthly_production"] > 0 else ""
+        )
         income_line = f"\n💰 **Daily income:** {b['daily_income']:+.2f} gold/day" if b["daily_income"] > 0 else ""
+
+        # Tech requirement note
+        from ww1_economy.tech_data import BUILDING_TECH_REQUIREMENTS, TECH_TREE
+        tech_req = BUILDING_TECH_REQUIREMENTS.get(b["name"])
+        tech_line = ""
+        if tech_req and tech_req in TECH_TREE:
+            tech_line = f"\n🔬 **Requires tech:** {TECH_TREE[tech_req].name}"
+
         e.add_field(
             name=f"**{b['name']}**  ({b['tier']})",
             value=(
@@ -438,6 +502,7 @@ def buildings_list_embed(tier_label: str, buildings_data: list[dict],
                 + prod_line
                 + res_line
                 + cons_line
+                + tech_line
             ),
             inline=False,
         )
@@ -449,13 +514,17 @@ def buildings_list_embed(tier_label: str, buildings_data: list[dict],
 
 def construct_info_embed(building: dict, country_name: str,
                           compatible_provinces: list[dict]) -> discord.Embed:
-    cons_res = building.get("construction_cost_resources", {})
+    cons_res  = building.get("construction_cost_resources", {})
     cons_line = ""
     if cons_res:
         parts = [f"{v} {k}" for k, v in cons_res.items()]
         cons_line = f"\n🧱 **Mats required:** {', '.join(parts)}"
-    prod = building.get("production_resource")
-    prod_line = f"\n📤 **Produces:** {building['monthly_production']} {building.get('production_unit','')} {prod or ''}/month" if building["monthly_production"] > 0 else ""
+    prod      = building.get("production_resource")
+    prod_line = (
+        f"\n📤 **Produces:** {building['monthly_production']} "
+        f"{building.get('production_unit','')} {prod or ''}/month"
+        if building["monthly_production"] > 0 else ""
+    )
     income_line = f"\n💰 **Daily income:** {building['daily_income']:+.2f} gold/day" if building["daily_income"] > 0 else ""
     res_note = ""
     if building.get("allowed_resources"):
@@ -479,13 +548,21 @@ def construct_info_embed(building: dict, country_name: str,
     return e
 
 
+def construct_tech_locked_embed(building_name: str, required_tech: str) -> discord.Embed:
+    return _base(
+        "🔒  Technology Required",
+        (
+            f"**{building_name}** cannot be built yet.\n\n"
+            f"You need to research **{required_tech}** first.\n"
+            "Use **`rp technology`** to see the tech tree and **`rp research <name>`** to start."
+        ),
+        COL_RED,
+    )
+
+
 def construct_confirm_embed(building_name: str, provinces: list[str],
                              total_gold: float, cons_resources: dict[str, int],
                              months: int) -> discord.Embed:
-    res_line = ""
-    if cons_resources:
-        parts = [f"{v} {k}" for k, v in cons_resources.items() for _ in [None]]
-        res_line = f"\n🧱 **Resources per province:** {', '.join(f'{v} {k}' for k,v in cons_resources.items())}"
     e = _base(
         "🔨  Confirm Construction",
         (
@@ -493,7 +570,11 @@ def construct_confirm_embed(building_name: str, provinces: list[str],
             f"**Provinces ({len(provinces)}):** {', '.join(provinces)}\n"
             f"**Construction Time:** {months} months each\n"
             f"💲 **Total Gold Cost:** {total_gold:,.0f} gold"
-            + res_line
+            + (
+                f"\n🧱 **Resources per province:** "
+                + ", ".join(f"{v} {k}" for k, v in cons_resources.items())
+                if cons_resources else ""
+            )
             + "\n\nClick **Construct** to begin, or **Cancel** to go back."
         ),
         COL_ORANGE,
@@ -517,3 +598,258 @@ def construct_success_embed(building_name: str, provinces: list[str],
 
 def construct_error_embed(reason: str) -> discord.Embed:
     return _base("❌  Construction Failed", reason, COL_RED)
+
+
+# ── rp technology ────────────────────────────────────────────────────────────
+
+def technology_main_embed(
+    country_name: str,
+    owner: str,
+    date: str,
+    research_speed: float,
+    active_research: dict | None,
+) -> discord.Embed:
+    if active_research:
+        rtype  = active_research["type"].title()
+        rid    = active_research["tech_id"]
+        pct    = active_research["pct_done"]
+        rem    = active_research["remaining_days"]
+        months = rem // 30
+        days   = rem % 30
+        time_str = f"{months}m {days}d" if months else f"{days}d"
+        research_line = f"🔬 **{rid.replace('_',' ').title()}** ({rtype}) — {pct}% done, {time_str} left"
+    else:
+        research_line = "*Nothing being researched.*"
+
+    e = _base(
+        f"🔬  Technology — {country_name}",
+        (
+            f"**Owner:** {owner}  •  **Date:** {date}\n\n"
+            f"📊 **Research Speed:** {research_speed:.1f}%/month\n"
+            f"🔬 **Currently Researching:** {research_line}\n\n"
+            "Select a category below to explore the technology tree."
+        ),
+        COL_PURPLE,
+    )
+    return e
+
+
+def tech_tree_embed(
+    country_name: str,
+    category: str,
+    items: list[dict],
+    page: int,
+    total_pages: int,
+    tech_status: dict,
+    paused_ids: set,
+) -> discord.Embed:
+    """
+    items: list of {tech_id, name, duration_months, prerequisites, description}
+    tech_status: {tech_id: row_dict}  — from DB
+    paused_ids: set of tech_ids that are paused
+    """
+    CAT_EMOJI = {
+        "Economic":       "📊",
+        "Infrastructure": "🏗️",
+        "Reforms":        "📜",
+        "Military":       "⚔️",
+    }
+    emoji = CAT_EMOJI.get(category, "🔬")
+    e = discord.Embed(
+        title=f"{emoji}  {category} — {country_name}",
+        description=f"Page {page}/{total_pages}  •  Use `rp research <name>` to start.",
+        colour=COL_PURPLE,
+    )
+
+    LEGEND = "✅ Unlocked  •  🔬 Researching  •  ⏸ Paused  •  📜 Available  •  🔒 Locked"
+    e.set_footer(text=LEGEND)
+
+    for item in items:
+        tid    = item["tech_id"]
+        name   = item["name"]
+        dur_m  = item.get("duration_months", 0)
+        prereqs = item.get("prerequisites", ())
+        descr  = item.get("description", "")
+        row    = tech_status.get(tid, {})
+
+        is_unlocked    = bool(row.get("is_unlocked", False))
+        is_researching = bool(row.get("is_researching", False))
+        is_paused      = tid in paused_ids
+
+        if is_unlocked:
+            icon = "✅"
+        elif is_researching:
+            icon = "🔬"
+        elif is_paused:
+            icon = "⏸"
+        elif prereqs:
+            icon = "🔒"
+        else:
+            icon = "📜"
+
+        extra = ""
+        if is_researching and row:
+            # Show % done
+            start = row.get("research_start_day", 0)
+            end_  = row.get("research_end_day", 0)
+            total = max(1, end_ - start)
+            extra = f" — *researching*"
+        elif is_paused:
+            extra = f" — *paused*"
+
+        prereq_str = ""
+        if prereqs and not is_unlocked:
+            prereq_str = f"\n  ↳ Requires: {', '.join(p.replace('_',' ').title() for p in prereqs)}"
+
+        desc_line = f"\n  {descr}" if descr else ""
+
+        e.add_field(
+            name=f"{icon}  {name}",
+            value=f"⏱️ {dur_m} months{extra}{desc_line}{prereq_str}",
+            inline=False,
+        )
+
+    return e
+
+
+# ── rp research ──────────────────────────────────────────────────────────────
+
+def research_started_embed(
+    tech_name: str,
+    duration_days: int,
+    speed_pct: float,
+    is_resume: bool = False,
+) -> discord.Embed:
+    months = duration_days // 30
+    days   = duration_days % 30
+    time_str = f"{months} months" if not days else f"{months}m {days}d"
+    action = "Resumed" if is_resume else "Started"
+    return _base(
+        f"🔬  Research {action}!",
+        (
+            f"**Technology:** {tech_name}\n"
+            f"**Time Remaining:** {time_str}\n"
+            f"**Research Speed:** {speed_pct:.1f}%/month\n\n"
+            "Use **`rp technology`** to track progress."
+        ),
+        COL_GREEN,
+    )
+
+
+def research_error_embed(reason: str) -> discord.Embed:
+    return _base("❌  Research Failed", reason, COL_RED)
+
+
+def switch_research_embed(
+    old_name: str,
+    old_remaining_days: int,
+    new_name: str,
+    new_duration_days: int,
+    speed_pct: float,
+) -> discord.Embed:
+    old_m = old_remaining_days // 30
+    old_d = old_remaining_days % 30
+    new_m = new_duration_days  // 30
+    new_d = new_duration_days  % 30
+    old_str = f"{old_m}m {old_d}d" if old_m else f"{old_d}d"
+    new_str = f"{new_m} months" if not new_d else f"{new_m}m {new_d}d"
+    return _base(
+        "🔄  Research Switched",
+        (
+            f"⏸ **Paused:** {old_name} *(had {old_str} remaining — saved)*\n\n"
+            f"🔬 **Now Researching:** {new_name}\n"
+            f"⏱️ **Duration:** {new_str}\n"
+            f"📊 **Speed:** {speed_pct:.1f}%/month\n\n"
+            f"Resume **{old_name}** later with `rp research {old_name.lower().replace(' ', '_')}`."
+        ),
+        COL_PURPLE,
+    )
+
+
+# ── rp reforms ───────────────────────────────────────────────────────────────
+
+def reforms_embed(
+    country_name: str,
+    owner: str,
+    date: str,
+    reforms: list[dict],
+    adopted_ids: set[str],
+    adopted_count: int,
+) -> discord.Embed:
+    from ww1_economy.tech_data import MAX_ADOPTED_REFORMS, REFORM_ADOPTION_COST
+    e = discord.Embed(
+        title=f"📜  Reforms — {country_name}",
+        description=(
+            f"**Owner:** {owner}  •  **Date:** {date}\n"
+            f"**Adopted:** {adopted_count}/{MAX_ADOPTED_REFORMS}  "
+            f"•  **Adoption Cost:** {REFORM_ADOPTION_COST:.0f} gold\n\n"
+            "✅ Adopted  •  📜 Researched (can adopt)  •  🔬 Researching  •  🔒 Not yet researched"
+        ),
+        colour=COL_TEAL,
+    )
+
+    for r in reforms:
+        rid       = r["reform_id"]
+        name      = r["name"]
+        dur_m     = r["duration_months"]
+        is_adopted = rid in adopted_ids
+        row_status = r.get("_status", {})
+        is_unlocked    = bool(row_status.get("is_unlocked", False))
+        is_researching = bool(row_status.get("is_researching", False))
+        prereqs        = r.get("prerequisites", ())
+
+        if is_adopted:
+            icon = "✅"
+        elif is_unlocked:
+            icon = "📜"
+        elif is_researching:
+            icon = "🔬"
+        elif prereqs:
+            icon = "🔒"
+        else:
+            icon = "📝"
+
+        effects = []
+        if r.get("opinion_bonus"):
+            effects.append(f"Opinion +{r['opinion_bonus']}")
+        if r.get("economy_efficiency_pct"):
+            effects.append(f"Efficiency {r['economy_efficiency_pct']:+.0f}%")
+        if r.get("recruitment_cost_pct"):
+            effects.append(f"Recruit cost {r['recruitment_cost_pct']:+.0f}%")
+        if r.get("population_growth_pct"):
+            effects.append(f"Pop growth {r['population_growth_pct']:+.0f}%")
+        if r.get("non_core_conversion_cost_pct"):
+            effects.append(f"Core cost {r['non_core_conversion_cost_pct']:+.0f}%")
+        if r.get("blocks_war_declaration"):
+            effects.append("Cannot declare war")
+
+        effects_str = ", ".join(effects) if effects else "Governance bonus"
+        prereq_str  = f"\n  ↳ Requires: {', '.join(prereqs)}" if prereqs and not is_unlocked else ""
+
+        e.add_field(
+            name=f"{icon}  {name}",
+            value=f"⏱️ {dur_m} months  •  🎯 {effects_str}{prereq_str}",
+            inline=False,
+        )
+
+    e.set_footer(text="WW1 Roleplay  •  rp adopt <reform> to adopt")
+    return e
+
+
+def adopt_success_embed(reform_name: str, gold_spent: float,
+                         new_treasury: float, adopted_count: int) -> discord.Embed:
+    from ww1_economy.tech_data import MAX_ADOPTED_REFORMS
+    return _base(
+        "✅  Reform Adopted!",
+        (
+            f"**Reform:** {reform_name}\n"
+            f"💲 **Gold Spent:** {gold_spent:.0f}\n"
+            f"💰 **Treasury:** {new_treasury:,.1f} gold\n"
+            f"📜 **Adopted:** {adopted_count}/{MAX_ADOPTED_REFORMS}"
+        ),
+        COL_GREEN,
+    )
+
+
+def adopt_error_embed(reason: str) -> discord.Embed:
+    return _base("❌  Adoption Failed", reason, COL_RED)

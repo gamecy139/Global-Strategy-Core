@@ -24,10 +24,21 @@ RELIGION_EMOJI: dict[str, str] = {
 RESOURCE_EMOJI: dict[str, str] = {
     "coal": "🪨", "iron": "⚙️", "gold": "🪙", "grain": "🌾",
     "meat": "🥩", "wood": "🪵", "oil": "🛢️", "cotton": "🧶",
-    "rubber": "🧪", "copper": "🔶", "horses": "🐎", "stone": "🪨",
-    "gems": "💎",
+    "rubber": "🧪", "copper": "🔶", "horses": "🐎", "stone": "🏔️",
+    "gems": "💎", "textiles": "🧵", "chemicals": "⚗️",
+    "gunpowder": "💣", "ammunition": "🔫", "medicines": "💊",
 }
 
+# Resources that appear in country_storage and should be displayed.
+# Horses, Textiles → give daily income only (no storage slot shown).
+# Gems, Gold       → credited to treasury directly (no storage slot shown).
+DISPLAY_STORAGE_RESOURCES = [
+    "iron", "coal", "copper", "stone", "wood", "rubber",
+    "grain", "meat", "cotton", "oil",
+    "chemicals", "gunpowder", "ammunition", "medicines",
+]
+
+# All resources that can actually exist in the storage table (including legacy).
 STORABLE_RESOURCES = [
     "iron","coal","copper","stone","wood","rubber","grain","meat",
     "horses","cotton","oil","gems","textiles","chemicals",
@@ -57,7 +68,8 @@ def get_countries() -> list[dict]:
     with _conn() as con:
         rows = con.execute(
             "SELECT country_id, country_name, total_population, "
-            "       treasury, daily_base_income, population_growth_rate "
+            "       treasury, daily_base_income, population_growth_rate, "
+            "       population_opinion, economy_efficiency "
             "FROM countries "
             "WHERE server_id=? AND scenario_id=? ORDER BY country_name",
             (SERVER_ID, SCENARIO_ID),
@@ -77,6 +89,10 @@ def get_countries() -> list[dict]:
                 "daily_base_income":      r["daily_base_income"] or 0.0,
                 "population_growth_rate": r["population_growth_rate"]
                                           if r["population_growth_rate"] is not None else 0.6,
+                "population_opinion":     r["population_opinion"]
+                                          if r["population_opinion"] is not None else 50,
+                "economy_efficiency":     r["economy_efficiency"]
+                                          if r["economy_efficiency"] is not None else 1.0,
                 "religion":               rel["religion"] if rel else "Unknown",
             })
     return result
@@ -135,6 +151,17 @@ def deduct_treasury(country_id: str, amount: float) -> float:
     return new_balance
 
 
+def credit_treasury(country_id: str, amount: float) -> None:
+    con2 = _write_conn()
+    con2.execute(
+        "UPDATE countries SET treasury = treasury + ? "
+        "WHERE server_id=? AND scenario_id=? AND country_id=?",
+        (amount, SERVER_ID, SCENARIO_ID, country_id),
+    )
+    con2.commit()
+    con2.close()
+
+
 # ── Provinces ─────────────────────────────────────────────────────────────────
 
 def get_provinces(country_id: str) -> list[dict]:
@@ -152,6 +179,7 @@ def get_provinces(country_id: str) -> list[dict]:
 # ── Storage ───────────────────────────────────────────────────────────────────
 
 def get_storage(country_id: str) -> dict:
+    """Returns full storage dict (all columns in country_storage)."""
     with _conn() as con:
         row = con.execute(
             "SELECT * FROM country_storage "
@@ -167,6 +195,12 @@ def get_storage(country_id: str) -> dict:
     return {r: 0 for r in STORABLE_RESOURCES}
 
 
+def get_display_storage(country_id: str) -> dict:
+    """Returns only the resources that should be shown in the storage embed."""
+    full = get_storage(country_id)
+    return {k: full.get(k, 0) for k in DISPLAY_STORAGE_RESOURCES}
+
+
 def deduct_storage_resources(country_id: str, resources: dict[str, int]) -> None:
     """Deduct multiple resources from storage. Raises ValueError if any insufficient."""
     storage = get_storage(country_id)
@@ -174,7 +208,6 @@ def deduct_storage_resources(country_id: str, resources: dict[str, int]) -> None
         have = storage.get(res, 0)
         if have < needed:
             raise ValueError(f"Insufficient {res}: need {needed}, have {have}")
-    # Apply deductions
     con2 = _write_conn()
     for res, needed in resources.items():
         con2.execute(
@@ -191,7 +224,8 @@ def deduct_storage_resources(country_id: str, resources: dict[str, int]) -> None
 def get_buildings_with_status(country_id: str, current_game_day: int) -> dict[str, list[str]]:
     """
     Returns {province_name: [status_string, …]}
-    Status strings include "(Under Construction — X days left)" for incomplete buildings.
+    Completed buildings show ✅/🔴.
+    Under-construction buildings show ⏳ with time left (or "completing soon" if 0 days left).
     """
     with _conn() as con:
         rows = con.execute(
@@ -215,10 +249,24 @@ def get_buildings_with_status(country_id: str, current_game_day: int) -> dict[st
             status = "✅" if r["is_active"] else "🔴"
             entry  = f"{status} {btype}"
         else:
-            days_left = max(0, (r["construction_end_time"] or 0) - current_game_day)
-            entry = f"⏳ {btype} *(Under Construction — {days_left} days left)*"
+            days_left = (r["construction_end_time"] or 0) - current_game_day
+            if days_left <= 0:
+                entry = f"⏳ {btype} *(Completing next tick…)*"
+            else:
+                entry = f"⏳ {btype} *(Under Construction — {days_left}d left)*"
         result.setdefault(pname, []).append(entry)
     return result
+
+
+def get_completed_building_types(country_id: str) -> set[str]:
+    """Return a set of building type names that are completed for this country."""
+    with _conn() as con:
+        rows = con.execute(
+            "SELECT building_type FROM buildings "
+            "WHERE server_id=? AND scenario_id=? AND country_id=? AND is_completed=1",
+            (SERVER_ID, SCENARIO_ID, country_id),
+        ).fetchall()
+    return {r["building_type"] for r in rows}
 
 
 # ── Building construction ─────────────────────────────────────────────────────
@@ -230,10 +278,6 @@ def construct_building(
     province_resource: str,
     current_game_day: int,
 ) -> dict:
-    """
-    Wrapper around BuildingSystem.start_construction.
-    Returns the result dict from the backend.
-    """
     from ww1_economy.db             import EconomyDB
     from ww1_economy.building_system import BuildingSystem
     from ww1_economy.treasury_system import TreasurySystem
@@ -256,6 +300,317 @@ def construct_building(
         treasury          = treasury,
         storage           = storage,
     )
+
+
+# ── Technology ────────────────────────────────────────────────────────────────
+
+def _get_econ_db():
+    from ww1_economy.db import EconomyDB
+    db = EconomyDB(DB_PATH)
+    db.init()
+    return db
+
+
+def get_tech_status_for_country(country_id: str) -> dict[str, dict]:
+    """Returns {tech_id: {is_unlocked, is_researching, research_start_day, research_end_day}}."""
+    db = _get_econ_db()
+    rows = db.get_technologies_for_country(SERVER_ID, SCENARIO_ID, country_id)
+    return {r["tech_id"]: r for r in rows}
+
+
+def get_reform_status_for_country(country_id: str) -> dict[str, dict]:
+    db = _get_econ_db()
+    rows = db.get_reforms_for_country(SERVER_ID, SCENARIO_ID, country_id)
+    return {r["reform_id"]: r for r in rows}
+
+
+def get_mil_tech_status_for_country(country_id: str) -> dict[str, dict]:
+    db = _get_econ_db()
+    rows = db.get_military_technologies_for_country(SERVER_ID, SCENARIO_ID, country_id)
+    return {r["tech_id"]: r for r in rows}
+
+
+def get_active_research_info(country_id: str, game_day: int) -> dict | None:
+    """
+    Returns info about whatever is currently being researched (tech, reform, or mil tech),
+    or None if nothing is being researched.
+    """
+    db = _get_econ_db()
+
+    row = db.get_active_research(SERVER_ID, SCENARIO_ID, country_id)
+    if row:
+        remaining = max(0, row["research_end_day"] - game_day)
+        total     = max(1, row["research_end_day"] - row["research_start_day"])
+        done      = max(0, game_day - row["research_start_day"])
+        pct       = min(100, int(done / total * 100))
+        return {
+            "tech_id":      row["tech_id"],
+            "type":         "tech",
+            "remaining_days": remaining,
+            "pct_done":     pct,
+        }
+
+    row = db.get_active_reform_research(SERVER_ID, SCENARIO_ID, country_id)
+    if row:
+        remaining = max(0, row["research_end_day"] - game_day)
+        total     = max(1, row["research_end_day"] - row["research_start_day"])
+        done      = max(0, game_day - row["research_start_day"])
+        pct       = min(100, int(done / total * 100))
+        return {
+            "tech_id":      row["reform_id"],
+            "type":         "reform",
+            "remaining_days": remaining,
+            "pct_done":     pct,
+        }
+
+    row = db.get_active_military_research(SERVER_ID, SCENARIO_ID, country_id)
+    if row:
+        remaining = max(0, row["research_end_day"] - game_day)
+        total     = max(1, row["research_end_day"] - row["research_start_day"])
+        done      = max(0, game_day - row["research_start_day"])
+        pct       = min(100, int(done / total * 100))
+        return {
+            "tech_id":      row["tech_id"],
+            "type":         "military",
+            "remaining_days": remaining,
+            "pct_done":     pct,
+        }
+
+    return None
+
+
+def get_research_speed(country_id: str) -> float:
+    """
+    Returns the final research speed in % per month.
+    base 1.0% + Library +0.5%, School +1.0%, University +1.5%.
+    Clamped to minimum 0.5%.
+    """
+    speed = 1.0
+    completed = get_completed_building_types(country_id)
+    from ww1_economy.tech_data import RESEARCH_SPEED_BONUSES
+    for btype, bonus in RESEARCH_SPEED_BONUSES.items():
+        if btype in completed:
+            speed += bonus
+    return max(0.5, speed)
+
+
+def cancel_active_research(country_id: str, game_day: int) -> dict | None:
+    """
+    Cancel whatever is currently being researched.
+    Returns {tech_id, type, remaining_days} or None if nothing was researching.
+    """
+    info = get_active_research_info(country_id, game_day)
+    if info is None:
+        return None
+
+    con = _write_conn()
+    try:
+        rtype = info["type"]
+        rid   = info["tech_id"]
+        if rtype == "tech":
+            con.execute(
+                "UPDATE technologies SET is_researching=0 "
+                "WHERE server_id=? AND scenario_id=? AND country_id=? AND tech_id=?",
+                (SERVER_ID, SCENARIO_ID, country_id, rid),
+            )
+        elif rtype == "reform":
+            con.execute(
+                "UPDATE reforms SET is_researching=0 "
+                "WHERE server_id=? AND scenario_id=? AND country_id=? AND reform_id=?",
+                (SERVER_ID, SCENARIO_ID, country_id, rid),
+            )
+        elif rtype == "military":
+            con.execute(
+                "UPDATE military_technologies SET is_researching=0 "
+                "WHERE server_id=? AND scenario_id=? AND country_id=? AND tech_id=?",
+                (SERVER_ID, SCENARIO_ID, country_id, rid),
+            )
+        con.commit()
+    finally:
+        con.close()
+
+    return info
+
+
+def start_tech_research(country_id: str, tech_id: str, game_day: int,
+                         remaining_days: int | None = None) -> dict:
+    """
+    Start or resume research on a civil technology.
+    Returns {"ok": True} or {"ok": False, "reason": str}.
+    """
+    from ww1_economy.tech_data import TECH_TREE
+    tdef = TECH_TREE.get(tech_id)
+    if tdef is None:
+        return {"ok": False, "reason": "Unknown technology."}
+
+    # Check prerequisites
+    db     = _get_econ_db()
+    status = get_tech_status_for_country(country_id)
+    for prereq in tdef.prerequisites:
+        if not status.get(prereq, {}).get("is_unlocked", False):
+            from ww1_economy.tech_data import TECH_TREE as TT
+            pname = TT[prereq].name if prereq in TT else prereq
+            return {"ok": False, "reason": f"Prerequisite not met: **{pname}**"}
+
+    if status.get(tech_id, {}).get("is_unlocked", False):
+        return {"ok": False, "reason": "This technology is already unlocked."}
+
+    duration = remaining_days if remaining_days is not None else tdef.duration_days
+    end_day  = game_day + duration
+
+    db.upsert_technology(
+        server_id          = SERVER_ID,
+        scenario_id        = SCENARIO_ID,
+        country_id         = country_id,
+        tech_id            = tech_id,
+        is_unlocked        = False,
+        is_researching     = True,
+        research_start_day = game_day,
+        research_end_day   = end_day,
+    )
+    return {"ok": True, "duration": duration, "end_day": end_day}
+
+
+def start_reform_research(country_id: str, reform_id: str, game_day: int,
+                           remaining_days: int | None = None) -> dict:
+    """Start or resume research on a reform."""
+    from ww1_economy.tech_data import REFORM_TREE
+    rdef = REFORM_TREE.get(reform_id)
+    if rdef is None:
+        return {"ok": False, "reason": "Unknown reform."}
+
+    db     = _get_econ_db()
+    rstatus = get_reform_status_for_country(country_id)
+
+    # Check prerequisites
+    for prereq in rdef.prerequisites:
+        if not rstatus.get(prereq, {}).get("is_unlocked", False):
+            from ww1_economy.tech_data import REFORM_TREE as RT
+            pname = RT[prereq].name if prereq in RT else prereq
+            return {"ok": False, "reason": f"Prerequisite not met: **{pname}**"}
+
+    if rstatus.get(reform_id, {}).get("is_unlocked", False):
+        return {"ok": False, "reason": "This reform is already researched."}
+    if rstatus.get(reform_id, {}).get("is_adopted", False):
+        return {"ok": False, "reason": "This reform is already adopted."}
+
+    duration = remaining_days if remaining_days is not None else rdef.duration_days
+    end_day  = game_day + duration
+
+    db.upsert_reform(
+        server_id          = SERVER_ID,
+        scenario_id        = SCENARIO_ID,
+        country_id         = country_id,
+        reform_id          = reform_id,
+        is_unlocked        = False,
+        is_adopted         = False,
+        is_researching     = True,
+        research_start_day = game_day,
+        research_end_day   = end_day,
+    )
+    return {"ok": True, "duration": duration, "end_day": end_day}
+
+
+def start_mil_tech_research(country_id: str, tech_id: str, game_day: int,
+                              remaining_days: int | None = None) -> dict:
+    """Start or resume research on a military technology."""
+    from ww1_economy.military_tech_data import MILITARY_TECH_TREE
+    tdef = MILITARY_TECH_TREE.get(tech_id)
+    if tdef is None:
+        return {"ok": False, "reason": "Unknown military technology."}
+
+    mstatus = get_mil_tech_status_for_country(country_id)
+    for prereq in tdef.prerequisites:
+        if not mstatus.get(prereq, {}).get("is_unlocked", False):
+            from ww1_economy.military_tech_data import MILITARY_TECH_TREE as MTT
+            pname = MTT[prereq].name if prereq in MTT else prereq
+            return {"ok": False, "reason": f"Prerequisite not met: **{pname}**"}
+
+    if mstatus.get(tech_id, {}).get("is_unlocked", False):
+        return {"ok": False, "reason": "This military technology is already unlocked."}
+
+    duration = remaining_days if remaining_days is not None else tdef.duration_days
+    end_day  = game_day + duration
+
+    db = _get_econ_db()
+    db.upsert_military_technology(
+        server_id              = SERVER_ID,
+        scenario_id            = SCENARIO_ID,
+        country_id             = country_id,
+        tech_id                = tech_id,
+        is_unlocked            = False,
+        is_researching         = True,
+        research_start_day     = game_day,
+        research_duration_days = duration,
+        research_end_day       = end_day,
+    )
+    return {"ok": True, "duration": duration, "end_day": end_day}
+
+
+def adopt_reform(country_id: str, reform_id: str) -> dict:
+    """
+    Adopt a researched reform. Costs 100 gold. Max 3 adopted at once.
+    Returns {"ok": True, "new_treasury": float} or {"ok": False, "reason": str}.
+    """
+    from ww1_economy.tech_data import REFORM_TREE, REFORM_ADOPTION_COST, MAX_ADOPTED_REFORMS
+
+    rdef = REFORM_TREE.get(reform_id)
+    if rdef is None:
+        return {"ok": False, "reason": "Unknown reform."}
+
+    db      = _get_econ_db()
+    rstatus = get_reform_status_for_country(country_id)
+    row     = rstatus.get(reform_id, {})
+
+    if not row.get("is_unlocked", False):
+        return {"ok": False, "reason": "This reform must be fully researched before it can be adopted."}
+    if row.get("is_adopted", False):
+        return {"ok": False, "reason": "This reform is already adopted."}
+
+    adopted = db.get_adopted_reforms(SERVER_ID, SCENARIO_ID, country_id)
+    if len(adopted) >= MAX_ADOPTED_REFORMS:
+        return {"ok": False, "reason": f"Maximum of **{MAX_ADOPTED_REFORMS}** reforms can be adopted at once."}
+
+    try:
+        new_bal = deduct_treasury(country_id, REFORM_ADOPTION_COST)
+    except ValueError as e:
+        return {"ok": False, "reason": str(e)}
+
+    db.adopt_reform(SERVER_ID, SCENARIO_ID, country_id, reform_id)
+    return {"ok": True, "new_treasury": new_bal, "adopted_count": len(adopted) + 1}
+
+
+# ── Fuzzy research name lookup ────────────────────────────────────────────────
+
+def find_research_target(query: str) -> dict | None:
+    """
+    Returns {tech_id, name, type, def} or None.
+    Searches TECH_TREE, REFORM_TREE, MILITARY_TECH_TREE.
+    """
+    from ww1_economy.tech_data          import TECH_TREE, REFORM_TREE
+    from ww1_economy.military_tech_data import MILITARY_TECH_TREE
+
+    q = query.strip().lower().replace("-", " ").replace("_", " ")
+
+    all_targets = []
+    for tid, tdef in TECH_TREE.items():
+        all_targets.append({"tech_id": tid, "name": tdef.name, "type": "tech", "def": tdef})
+    for rid, rdef in REFORM_TREE.items():
+        all_targets.append({"tech_id": rid, "name": rdef.name, "type": "reform", "def": rdef})
+    for tid, tdef in MILITARY_TECH_TREE.items():
+        all_targets.append({"tech_id": tid, "name": tdef.name, "type": "military", "def": tdef})
+
+    # Exact match first
+    for t in all_targets:
+        norm = t["name"].lower().replace("-", " ").replace("_", " ")
+        if norm == q or t["tech_id"].replace("_", " ") == q:
+            return t
+    # Partial match
+    for t in all_targets:
+        norm = t["name"].lower().replace("-", " ").replace("_", " ")
+        if q in norm or q in t["tech_id"].replace("_", " "):
+            return t
+    return None
 
 
 # ── Army ─────────────────────────────────────────────────────────────────────

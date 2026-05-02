@@ -1,6 +1,17 @@
 """
-Background tick loop — advances in-game time and applies economic effects.
+Background tick loop — advances in-game time and applies all economic effects.
 Runs every 10 real seconds; advances game days based on each guild's speed setting.
+
+On bot startup, last_tick_real_s is reset to NOW so offline time never
+accumulates as phantom game-days.
+
+Monthly tick uses the full TickSystem (consumption → production → market →
+efficiency) so that:
+  • Tier 2 buildings consume resources and activate/deactivate
+  • Storage fills from production (Tier 1 & Tier 2)
+  • Gold/Gems mines credit treasury directly
+  • daily_base_income is refreshed from actual active buildings
+  • Economy efficiency is recomputed from opinion/unrest/war
 """
 from __future__ import annotations
 
@@ -14,45 +25,29 @@ from ww1_economy.db import EconomyDB
 
 log = logging.getLogger("tick")
 
-WW1_DB = os.environ.get("WW1_DB_PATH", "ww1_scenario.db")
+WW1_DB      = os.environ.get("WW1_DB_PATH", "ww1_scenario.db")
 SERVER_ID   = "guild_demo"
 SCENARIO_ID = "ww1"
 
-_db: EconomyDB | None = None
+_tick_system = None
 
 
-def _get_db() -> EconomyDB:
-    global _db
-    if _db is None:
-        _db = EconomyDB(WW1_DB)
-        _db.init()
-    return _db
-
-
-# ── Tick helpers ──────────────────────────────────────────────────────────────
-
-def _apply_daily_income(country_id: str, days: int) -> None:
-    """Credit daily_base_income × days to the country's treasury."""
-    db = _get_db()
-    row = db.get_country(SERVER_ID, SCENARIO_ID, country_id)
-    if row is None:
-        return
-    income = float(row.get("daily_base_income") or 0.0)
-    if income > 0 and days > 0:
-        try:
-            db.update_country_fields(
-                SERVER_ID, SCENARIO_ID, country_id,
-                treasury=float(row.get("treasury") or 0.0) + income * days,
-            )
-        except Exception as e:
-            log.warning("Treasury update failed for %s: %s", country_id, e)
+def _get_tick_system():
+    global _tick_system
+    if _tick_system is None:
+        from ww1_economy.tick_system import TickSystem
+        db = EconomyDB(WW1_DB)
+        db.init()
+        _tick_system = TickSystem.assemble(db)
+    return _tick_system
 
 
 def _apply_monthly_growth(country_id: str, months_crossed: int) -> None:
-    """Compound monthly population growth."""
+    """Compound monthly population growth (province-level + country total)."""
     if months_crossed <= 0:
         return
-    db = _get_db()
+    db = EconomyDB(WW1_DB)
+    db.init()
     row = db.get_country(SERVER_ID, SCENARIO_ID, country_id)
     if row is None:
         return
@@ -65,7 +60,6 @@ def _apply_monthly_growth(country_id: str, months_crossed: int) -> None:
             SERVER_ID, SCENARIO_ID, country_id,
             total_population=new_pop,
         )
-        # Also update per-province populations proportionally
         import sqlite3
         con = sqlite3.connect(WW1_DB)
         con.execute(
@@ -80,48 +74,60 @@ def _apply_monthly_growth(country_id: str, months_crossed: int) -> None:
 
 
 def _get_all_assigned_countries(guild_id: str) -> list[str]:
-    assignments = game_state.get_assignments(guild_id)
-    return list(assignments.keys())
+    return list(game_state.get_assignments(guild_id).keys())
 
 
 # ── Main tick task ────────────────────────────────────────────────────────────
 
 @tasks.loop(seconds=10)
 async def tick_task() -> None:
+    ts = _get_tick_system()
+
     sessions = game_state.get_all_sessions()
     for session in sessions:
-        guild_id  = session["guild_id"]
+        guild_id        = session["guild_id"]
         game_day_before = session["game_day"]
 
         days_advanced, new_game_day = game_state.advance_tick(guild_id)
         if days_advanced <= 0:
             continue
 
-        log.debug("Guild %s advanced %d days → day %d (%s)",
+        log.debug("Guild %s: +%d days → day %d (%s)",
                   guild_id, days_advanced, new_game_day,
                   game_state.game_date_str(new_game_day))
 
-        country_ids = _get_all_assigned_countries(guild_id)
+        # ── Daily tick: building completions, tech/reform completions, income ──
+        try:
+            ts.daily_tick(SERVER_ID, SCENARIO_ID, new_game_day, days_advanced)
+        except Exception as e:
+            log.warning("Daily tick error: %s", e)
 
-        for cid in country_ids:
-            # Apply daily income
-            _apply_daily_income(cid, days_advanced)
+        # ── Monthly tick: consumption → production → market → efficiency ───────
+        month_before   = game_day_before  // game_state.DAYS_PER_MONTH
+        month_after    = new_game_day     // game_state.DAYS_PER_MONTH
+        months_crossed = month_after - month_before
 
-            # Check if any month boundaries were crossed
-            month_before = game_day_before // game_state.DAYS_PER_MONTH
-            month_after  = new_game_day    // game_state.DAYS_PER_MONTH
-            months_crossed = month_after - month_before
-            if months_crossed > 0:
+        if months_crossed > 0:
+            try:
+                ts.monthly_tick(SERVER_ID, SCENARIO_ID, month_after)
+            except Exception as e:
+                log.warning("Monthly tick error: %s", e)
+
+            # Population growth — applied per assigned country
+            country_ids = _get_all_assigned_countries(guild_id)
+            for cid in country_ids:
                 _apply_monthly_growth(cid, months_crossed)
 
 
 @tick_task.before_loop
 async def _before_tick(bot=None) -> None:
-    pass  # bot.wait_until_ready() handled in start_tick
+    pass
 
 
 async def start_tick(bot) -> None:
     await bot.wait_until_ready()
+    # Reset all tick clocks — time should NOT advance while bot is offline
+    game_state.reset_all_tick_clocks()
     if not tick_task.is_running():
         tick_task.start()
-        log.info("Tick runner started.")
+        log.info("Tick runner started (tick clocks reset to now).")

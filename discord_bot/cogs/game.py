@@ -1,5 +1,5 @@
 """
-Main game cog — rp help / start / countries / select / speed / my_country / mc
+Main game cog — rp help / start / countries / select / speed / my_country / mc / clear
 """
 from __future__ import annotations
 
@@ -13,10 +13,19 @@ from discord_bot.ww1_data import (
 )
 
 COUNTRIES_PER_PAGE = 9
+AUTHORISED_USER    = "xter_gamer"
 
 
 def _is_admin(ctx: commands.Context) -> bool:
     return ctx.author.guild_permissions.administrator
+
+
+def _is_authorised(ctx: commands.Context) -> bool:
+    """Returns True if the user is xter_gamer (by display name or username)."""
+    return (
+        ctx.author.display_name.lower() == AUTHORISED_USER.lower()
+        or ctx.author.name.lower()         == AUTHORISED_USER.lower()
+    )
 
 
 # ── Scenario selector ─────────────────────────────────────────────────────────
@@ -131,6 +140,33 @@ class SpeedView(discord.ui.View):
     def __init__(self, current_value: str):
         super().__init__(timeout=90)
         self.add_item(SpeedSelect(current_value))
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+
+# ── Clear game: confirmation view ─────────────────────────────────────────────
+
+class ClearConfirmView(discord.ui.View):
+    def __init__(self, guild_id: str):
+        super().__init__(timeout=60)
+        self.guild_id = guild_id
+
+    @discord.ui.button(label="✅  Yes, Reset", style=discord.ButtonStyle.danger)
+    async def yes_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        game_state.reset_guild_game(self.guild_id)
+        self.stop()
+        await interaction.response.edit_message(
+            embed=embeds.clear_success_embed(), view=None,
+        )
+
+    @discord.ui.button(label="❌  No, Cancel", style=discord.ButtonStyle.secondary)
+    async def no_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.stop()
+        await interaction.response.edit_message(
+            embed=embeds.clear_cancelled_embed(), view=None,
+        )
 
     async def on_timeout(self):
         for item in self.children:
@@ -319,6 +355,16 @@ class GameCog(commands.Cog, name="Game"):
             embed=embeds.my_country_overview_embed(country, ctx.author.display_name, date),
             view=view,
         )
+
+    @commands.command(name="clear")
+    async def clear_cmd(self, ctx: commands.Context):
+        """Reset the entire game for this server. Only xter_gamer can use this."""
+        if not _is_authorised(ctx):
+            await ctx.send(embed=embeds.not_authorised_embed("rp clear"))
+            return
+        guild_id = str(ctx.guild.id)
+        view     = ClearConfirmView(guild_id)
+        await ctx.send(embed=embeds.clear_confirm_embed(), view=view)
 
 
 async def setup(bot: commands.Bot):

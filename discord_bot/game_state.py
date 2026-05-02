@@ -1,6 +1,7 @@
 """
-SQLite store for per-guild game sessions, speed, tick clock, investments, and country assignments.
-All data persists across bot restarts — nothing is held only in memory.
+SQLite store for per-guild game sessions, speed, tick clock, investments,
+country assignments, and paused research.
+All data persists across bot restarts.
 """
 from __future__ import annotations
 
@@ -20,7 +21,6 @@ SPEED_OPTIONS: list[dict] = [
 ]
 DEFAULT_SPEED = "1x"
 
-# Real seconds required to pass for one game day to advance
 SPEED_SECS_PER_DAY: dict[str, float] = {
     "paused": 0.0,
     "1x":    60.0,
@@ -39,10 +39,10 @@ MONTH_NAMES        = [
     "July","August","September","October","November","December",
 ]
 
-BASE_GROWTH_RATE   = 0.6   # % per month
-MAX_GROWTH_RATE    = 2.0   # % per month cap
-GROWTH_STEP        = 0.05  # % per investment
-BASE_INVEST_COST   = 20.0  # gold for first investment
+BASE_GROWTH_RATE   = 0.6
+MAX_GROWTH_RATE    = 2.0
+GROWTH_STEP        = 0.05
+BASE_INVEST_COST   = 20.0
 
 
 @contextmanager
@@ -106,6 +106,16 @@ def init() -> None:
                 growth_bonus      REAL NOT NULL DEFAULT 0.0,
                 next_invest_cost  REAL NOT NULL DEFAULT 20.0,
                 PRIMARY KEY (guild_id, country_id)
+            )
+        """)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS paused_research (
+                guild_id        TEXT NOT NULL,
+                country_id      TEXT NOT NULL,
+                research_id     TEXT NOT NULL,
+                research_type   TEXT NOT NULL DEFAULT 'tech',
+                remaining_days  INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (guild_id, country_id, research_id)
             )
         """)
 
@@ -187,8 +197,7 @@ def get_game_year(guild_id: str) -> int:
 
 def advance_tick(guild_id: str) -> tuple[int, int]:
     """
-    Compute how many game days have elapsed since the last tick,
-    advance game_day, update last_tick_real_s.
+    Compute how many game days have elapsed since the last tick.
     Returns (days_advanced, new_game_day).
     """
     now = time.time()
@@ -202,7 +211,6 @@ def advance_tick(guild_id: str) -> tuple[int, int]:
     game_day     = row["game_day"]
 
     if secs_per_day <= 0.0:
-        # Paused — update timestamp so it doesn't accumulate
         with _conn() as con:
             con.execute(
                 "UPDATE game_sessions SET last_tick_real_s=? WHERE guild_id=?",
@@ -216,8 +224,7 @@ def advance_tick(guild_id: str) -> tuple[int, int]:
     if days_advanced <= 0:
         return 0, game_day
 
-    new_day = game_day + days_advanced
-    # Move last_tick forward by exactly the days we advanced (avoid drift)
+    new_day  = game_day + days_advanced
     new_last = last_tick + days_advanced * secs_per_day
 
     with _conn() as con:
@@ -226,6 +233,26 @@ def advance_tick(guild_id: str) -> tuple[int, int]:
             (new_day, new_last, guild_id),
         )
     return days_advanced, new_day
+
+
+def reset_all_tick_clocks() -> None:
+    """
+    Call on bot startup — sets last_tick_real_s to NOW for every active
+    session so offline time does not accumulate as game-days.
+    """
+    now = time.time()
+    with _conn() as con:
+        con.execute("UPDATE game_sessions SET last_tick_real_s=?", (now,))
+
+
+def reset_guild_game(guild_id: str) -> None:
+    """Wipe all game state for a single guild (does NOT touch ww1_scenario.db)."""
+    with _conn() as con:
+        con.execute("DELETE FROM game_sessions        WHERE guild_id=?", (guild_id,))
+        con.execute("DELETE FROM country_assignments  WHERE guild_id=?", (guild_id,))
+        con.execute("DELETE FROM user_country         WHERE guild_id=?", (guild_id,))
+        con.execute("DELETE FROM country_investments  WHERE guild_id=?", (guild_id,))
+        con.execute("DELETE FROM paused_research      WHERE guild_id=?", (guild_id,))
 
 
 # ── Country assignment helpers ────────────────────────────────────────────────
@@ -309,3 +336,39 @@ def save_investment(guild_id: str, country_id: str,
                 growth_bonus     = excluded.growth_bonus,
                 next_invest_cost = excluded.next_invest_cost
         """, (guild_id, country_id, growth_bonus, next_invest_cost))
+
+
+# ── Paused research helpers ───────────────────────────────────────────────────
+
+def save_paused_research(guild_id: str, country_id: str,
+                          research_id: str, research_type: str,
+                          remaining_days: int) -> None:
+    with _conn() as con:
+        con.execute("""
+            INSERT INTO paused_research
+                (guild_id, country_id, research_id, research_type, remaining_days)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(guild_id, country_id, research_id) DO UPDATE SET
+                research_type  = excluded.research_type,
+                remaining_days = excluded.remaining_days
+        """, (guild_id, country_id, research_id, research_type, remaining_days))
+
+
+def get_paused_research(guild_id: str, country_id: str,
+                         research_id: str) -> dict | None:
+    with _conn() as con:
+        row = con.execute(
+            "SELECT * FROM paused_research "
+            "WHERE guild_id=? AND country_id=? AND research_id=?",
+            (guild_id, country_id, research_id),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def clear_paused_research(guild_id: str, country_id: str, research_id: str) -> None:
+    with _conn() as con:
+        con.execute(
+            "DELETE FROM paused_research "
+            "WHERE guild_id=? AND country_id=? AND research_id=?",
+            (guild_id, country_id, research_id),
+        )
