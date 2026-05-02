@@ -41,12 +41,19 @@ class TaxLevel(Enum):
 
     Each member carries a TaxLevelConfig with income and opinion effects.
     The string value matches the canonical name stored in the database.
+
+    Values updated to match the WW1 economy specification:
+      Tax Exemption     → income −20% (×0.80), opinion +10/month
+      Light Contribution→ income −10% (×0.90), opinion  +5/month
+      Standard          → income   0% (×1.00), opinion   0/month
+      Elevated          → income  +5% (×1.05), opinion −10/month
+      War Levy          → income +15% (×1.15), opinion −25/month
     """
-    TAX_EXEMPTION        = TaxLevelConfig("Tax Exemption",         0.50,  +2)
-    LIGHT_CONTRIBUTION   = TaxLevelConfig("Light Contribution",    0.75,  +1)
-    STANDARD_CONTRIBUTION = TaxLevelConfig("Standard Contribution", 1.00,   0)
-    ELEVATED_CONTRIBUTION = TaxLevelConfig("Elevated Contribution", 1.50,  -2)
-    WAR_LEVY             = TaxLevelConfig("War Levy",               2.00,  -4)
+    TAX_EXEMPTION         = TaxLevelConfig("Tax Exemption",      0.80, +10)
+    LIGHT_CONTRIBUTION    = TaxLevelConfig("Light Contribution", 0.90,  +5)
+    STANDARD_CONTRIBUTION = TaxLevelConfig("Standard",           1.00,   0)
+    ELEVATED_CONTRIBUTION = TaxLevelConfig("Elevated",           1.05, -10)
+    WAR_LEVY              = TaxLevelConfig("War Levy",           1.15, -25)
 
     @property
     def config(self) -> TaxLevelConfig:

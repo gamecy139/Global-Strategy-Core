@@ -51,8 +51,10 @@ _COUNTRY_COLUMNS: frozenset[str] = frozenset({
     "daily_base_income",
     "base_income_floor",
     "tax_multiplier",
+    "tax_level",
     "economy_efficiency",
     "war_victory_end_month",
+    "war_start_month",
     "in_active_war",
     "population_opinion",
     "unrest",
@@ -237,8 +239,10 @@ class EconomyDB:
             ("daily_base_income",       "REAL    NOT NULL DEFAULT 0.0"),
             ("base_income_floor",       "REAL    NOT NULL DEFAULT 0.0"),
             ("tax_multiplier",          "REAL    NOT NULL DEFAULT 1.0"),
+            ("tax_level",               "TEXT    NOT NULL DEFAULT 'standard'"),
             ("economy_efficiency",      "REAL    NOT NULL DEFAULT 1.0"),
             ("war_victory_end_month",   "INTEGER NOT NULL DEFAULT 0"),
+            ("war_start_month",         "INTEGER NOT NULL DEFAULT 0"),
             ("in_active_war",           "INTEGER NOT NULL DEFAULT 0"),
             ("population_opinion",      "INTEGER NOT NULL DEFAULT 50"),
             ("unrest",                  "REAL    NOT NULL DEFAULT 0.0"),
@@ -2455,6 +2459,37 @@ class EconomyDB:
                 "SELECT COUNT(*) FROM province_cores "
                 "WHERE server_id=? AND scenario_id=? AND country_id=? AND is_core=0",
                 (server_id, scenario_id, country_id),
+            ).fetchone()
+        return row[0] if row else 0
+
+    def count_province_religion_mismatches(
+        self, server_id: str, scenario_id: str, country_id: str
+    ) -> int:
+        """
+        Count provinces owned by country_id whose religion differs from the
+        country's main religion.  Provinces with no religion entry are also
+        counted as a mismatch.  Returns 0 if the country has no religion row.
+        """
+        with self._connection() as conn:
+            cr = conn.execute(
+                "SELECT religion FROM country_religions "
+                "WHERE server_id=? AND scenario_id=? AND country_id=?",
+                (server_id, scenario_id, country_id),
+            ).fetchone()
+            if cr is None:
+                return 0
+            country_religion = cr[0]
+            row = conn.execute(
+                """
+                SELECT COUNT(*) FROM provinces p
+                LEFT JOIN province_religions pr
+                    ON pr.province_id  = p.province_id
+                    AND pr.server_id   = p.server_id
+                    AND pr.scenario_id = p.scenario_id
+                WHERE p.server_id=? AND p.scenario_id=? AND p.owner_country=?
+                AND (pr.religion IS NULL OR pr.religion != ?)
+                """,
+                (server_id, scenario_id, country_id, country_religion),
             ).fetchone()
         return row[0] if row else 0
 

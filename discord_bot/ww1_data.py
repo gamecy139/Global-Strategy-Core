@@ -641,6 +641,76 @@ def remove_reform(country_id: str, reform_id: str) -> dict:
     return {"ok": True, "adopted_count": len(adopted)}
 
 
+def get_current_tax_level(country_id: str) -> str:
+    """Return the current tax_level key for the country (default 'standard')."""
+    with _conn() as con:
+        row = con.execute(
+            "SELECT tax_level FROM countries "
+            "WHERE server_id=? AND scenario_id=? AND country_id=?",
+            (SERVER_ID, SCENARIO_ID, country_id),
+        ).fetchone()
+    if row and row["tax_level"]:
+        return row["tax_level"]
+    return "standard"
+
+
+def set_country_tax_level(
+    country_id:    str,
+    tax_key:       str,
+    current_month: int = 0,
+) -> dict:
+    """
+    Set the country's tax policy.
+
+    1. Reverses the old tier's opinion contribution and applies the new one.
+    2. Writes tax_level + tax_multiplier to the DB.
+    3. Recomputes economy_efficiency immediately.
+
+    Returns {"ok": True, "opinion": int, "efficiency": float}
+         or {"ok": False, "reason": str}.
+    """
+    from ww1_economy.efficiency_system import WW1_TAX_MAP, EconomyEfficiencySystem
+    from ww1_economy.db import EconomyDB
+
+    new_tier = WW1_TAX_MAP.get(tax_key)
+    if new_tier is None:
+        return {"ok": False, "reason": f"Unknown tax level: '{tax_key}'"}
+
+    old_key  = get_current_tax_level(country_id)
+    old_tier = WW1_TAX_MAP.get(old_key, WW1_TAX_MAP["standard"])
+
+    opinion_delta = new_tier["opinion"] - old_tier["opinion"]
+    if opinion_delta:
+        _apply_opinion_delta(country_id, opinion_delta)
+
+    con = _write_conn()
+    try:
+        con.execute(
+            "UPDATE countries SET tax_level=?, tax_multiplier=? "
+            "WHERE server_id=? AND scenario_id=? AND country_id=?",
+            (tax_key, new_tier["multiplier"], SERVER_ID, SCENARIO_ID, country_id),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    db  = EconomyDB(DB_PATH)
+    db.init()
+    eff_sys = EconomyEfficiencySystem(db)
+    eff_sys.recompute(SERVER_ID, SCENARIO_ID, country_id, current_month)
+
+    with _conn() as c:
+        row = c.execute(
+            "SELECT population_opinion, economy_efficiency FROM countries "
+            "WHERE server_id=? AND scenario_id=? AND country_id=?",
+            (SERVER_ID, SCENARIO_ID, country_id),
+        ).fetchone()
+
+    opinion    = int(row["population_opinion"])  if row else 50
+    efficiency = float(row["economy_efficiency"]) if row else 1.0
+    return {"ok": True, "opinion": opinion, "efficiency": efficiency}
+
+
 def get_market_snapshot() -> list[dict]:
     """
     Return current market state for all resources (initialising rows if needed).

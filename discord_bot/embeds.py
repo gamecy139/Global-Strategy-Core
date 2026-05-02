@@ -78,6 +78,7 @@ def help_embed() -> discord.Embed:
         ("rp reforms",                    "View all reforms and their effects."),
         ("rp adopt `<reform>`",           "Adopt a researched reform (costs 100 gold)."),
         ("rp rr `<reform>`",              "Remove / unadopt an active reform."),
+        ("rp taxation",                   "Set your tax policy (affects income & opinion)."),
         ("rp gm",                         "Open the Global Market to buy resources."),
     ]
     for name, desc in cmds:
@@ -967,3 +968,74 @@ def market_buy_success_embed(
 
 def market_buy_error_embed(reason: str) -> discord.Embed:
     return _base("❌  Purchase Failed", reason, COL_RED)
+
+
+# ── Taxation ──────────────────────────────────────────────────────────────────
+
+_TAX_EMOJI: dict[str, str] = {
+    "tax_exemption":      "⚪",
+    "light_contribution": "🟢",
+    "standard":           "🔵",
+    "elevated":           "🟠",
+    "war_levy":           "🔴",
+}
+
+
+def taxation_embed(
+    country_name:       str,
+    tiers:              list[dict],
+    current_tax_key:    str,
+    current_opinion:    int,
+    current_efficiency: float,
+) -> discord.Embed:
+    e = _base(
+        "🪙  Taxation Policy",
+        f"**{country_name}** — Select your tax level from the dropdown below.\n"
+        "Only one tier can be active at a time.",
+        COL_GOLD,
+    )
+
+    lines = []
+    for tier in tiers:
+        key    = tier["key"]
+        emoji  = _TAX_EMOJI.get(key, "⚫")
+        op     = tier["opinion"]
+        op_str = f"+{op}" if op > 0 else str(op)
+        marker = "  ◄ **Active**" if key == current_tax_key else ""
+        lines.append(f"{emoji} **{tier['label']}** — Opinion `{op_str}`{marker}")
+
+    e.add_field(name="Tax Tiers", value="\n".join(lines), inline=False)
+    e.add_field(
+        name="📊 Current Opinion",
+        value=f"`{current_opinion}/100`",
+        inline=True,
+    )
+    e.add_field(
+        name="⚙️ Economy Efficiency",
+        value=f"`{current_efficiency * 100:.1f}%`",
+        inline=True,
+    )
+    e.set_footer(text="Use the dropdown to change tax policy  •  WW1 Roleplay")
+    return e
+
+
+def taxation_changed_embed(
+    tier:       dict,
+    opinion:    int,
+    efficiency: float,
+) -> discord.Embed:
+    key    = tier["key"]
+    emoji  = _TAX_EMOJI.get(key, "⚫")
+    op     = tier["opinion"]
+    op_str = f"+{op}" if op > 0 else str(op)
+
+    lines = [
+        f"{emoji} Tax policy set to **{tier['label']}**",
+        "",
+        f"👥 **Opinion change:** `{op_str}`",
+        f"📊 **New opinion:** `{opinion}/100`",
+        f"⚙️ **Economy Efficiency:** `{efficiency * 100:.1f}%`",
+        "",
+        f"💰 **Income modifier:** `×{tier['multiplier']:.2f}`",
+    ]
+    return _base("✅  Tax Policy Updated", "\n".join(lines), COL_GREEN)

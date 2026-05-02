@@ -19,6 +19,7 @@ from discord_bot.ww1_data import (
     start_tech_research, start_reform_research, start_mil_tech_research,
     adopt_reform, find_research_target, remove_reform,
     get_market_snapshot, buy_from_market,
+    get_current_tax_level, set_country_tax_level,
 )
 
 # Items shown per tech-tree page
@@ -467,6 +468,106 @@ class TechTreeView(discord.ui.View):
             tech_status  = tech_status,
             paused_ids   = paused_ids,
         )
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+
+# ── Taxation — dropdown & view ───────────────────────────────────────────────
+
+_TAX_EMOJI: dict[str, str] = {
+    "tax_exemption":      "⚪",
+    "light_contribution": "🟢",
+    "standard":           "🔵",
+    "elevated":           "🟠",
+    "war_levy":           "🔴",
+}
+
+
+class TaxSelect(discord.ui.Select):
+    def __init__(
+        self,
+        current_tax_key: str,
+        country_id:      str,
+        guild_id:        str,
+        current_month:   int,
+    ):
+        self.country_id    = country_id
+        self.guild_id      = guild_id
+        self.current_month = current_month
+
+        from ww1_economy.efficiency_system import WW1_TAX_TIERS, WW1_TAX_MAP
+        self._tax_map = WW1_TAX_MAP
+
+        options = []
+        for tier in WW1_TAX_TIERS:
+            key    = tier["key"]
+            emoji  = _TAX_EMOJI.get(key, "⚫")
+            op     = tier["opinion"]
+            op_str = f"+{op}" if op > 0 else str(op)
+            options.append(discord.SelectOption(
+                label       = tier["label"],
+                value       = key,
+                description = f"Opinion {op_str}",
+                emoji       = emoji,
+                default     = (key == current_tax_key),
+            ))
+
+        super().__init__(
+            placeholder = "Select tax policy…",
+            min_values  = 1,
+            max_values  = 1,
+            options     = options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+
+        user_id    = str(interaction.user.id)
+        guild_id   = self.guild_id
+        country_id = self.country_id
+
+        actual = game_state.get_user_country(guild_id, user_id)
+        if actual != country_id:
+            await interaction.followup.send(
+                embed=embeds.select_error_embed("You don't control this country."),
+                ephemeral=True,
+            )
+            return
+
+        tax_key  = self.values[0]
+        new_tier = self._tax_map[tax_key]
+
+        result = set_country_tax_level(country_id, tax_key, current_month=self.current_month)
+        if not result["ok"]:
+            await interaction.followup.send(
+                embed=embeds.select_error_embed(result["reason"]),
+                ephemeral=True,
+            )
+            return
+
+        new_view = TaxationView(tax_key, country_id, guild_id, self.current_month)
+        await interaction.edit_original_response(
+            embed=embeds.taxation_changed_embed(
+                tier       = new_tier,
+                opinion    = result["opinion"],
+                efficiency = result["efficiency"],
+            ),
+            view=new_view,
+        )
+
+
+class TaxationView(discord.ui.View):
+    def __init__(
+        self,
+        current_tax_key: str,
+        country_id:      str,
+        guild_id:        str,
+        current_month:   int,
+    ):
+        super().__init__(timeout=120)
+        self.add_item(TaxSelect(current_tax_key, country_id, guild_id, current_month))
 
     async def on_timeout(self):
         for item in self.children:
@@ -1221,6 +1322,43 @@ class EconomyCog(commands.Cog, name="Economy"):
             adopted_count = result["adopted_count"],
         ))
 
+
+    # ── rp taxation ───────────────────────────────────────────────────────────
+
+    @commands.command(name="taxation", aliases=["tax"])
+    async def taxation_cmd(self, ctx: commands.Context):
+        guild_id = str(ctx.guild.id)
+        user_id  = str(ctx.author.id)
+
+        if not game_state.is_game_running(guild_id):
+            await ctx.send(embed=embeds.no_game_embed())
+            return
+
+        country_id = game_state.get_user_country(guild_id, user_id)
+        if country_id is None:
+            await ctx.send(embed=embeds.no_country_embed())
+            return
+
+        from ww1_economy.efficiency_system import WW1_TAX_TIERS
+
+        country       = get_country_by_id(country_id)
+        game_day      = game_state.get_game_day(guild_id)
+        current_month = game_day // 30
+
+        current_tax_key = get_current_tax_level(country_id)
+        opinion         = int(country.get("population_opinion", 50))
+        efficiency      = float(country.get("economy_efficiency", 1.0))
+
+        await ctx.send(
+            embed=embeds.taxation_embed(
+                country_name       = country["country_name"],
+                tiers              = WW1_TAX_TIERS,
+                current_tax_key    = current_tax_key,
+                current_opinion    = opinion,
+                current_efficiency = efficiency,
+            ),
+            view=TaxationView(current_tax_key, country_id, guild_id, current_month),
+        )
 
     # ── rp gm / rp global_market ──────────────────────────────────────────────
 
