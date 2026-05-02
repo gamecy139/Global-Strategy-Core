@@ -1,0 +1,345 @@
+Implement full War, Battle, Movement, and Army Interaction System for the WW1 game.
+
+--------------------------------------------------
+1. WAR SYSTEM CORE
+--------------------------------------------------
+
+Create War object:
+
+war = {
+    id,
+    attacker,
+    defender,
+    attackers_allies: [],
+    defenders_allies: [],
+    war_score_attacker: 50,
+    war_score_defender: 50,
+    occupied_provinces: {},
+    start_date,
+    status: "active"
+}
+
+RULE:
+war_score_attacker + war_score_defender = 100 ALWAYS
+
+--------------------------------------------------
+2. START WAR
+--------------------------------------------------
+
+Command: rp declare_war <country>
+
+Conditions:
+- diplomacy < 20
+- not already in war
+
+On start:
+- create war object
+- set score 50/50
+- set war_active = True
+- apply war penalties immediately:
+    - economy efficiency reduction
+    - opinion effects
+    - enable consumption system
+
+--------------------------------------------------
+3. WAR DISPLAY (rp war)
+--------------------------------------------------
+
+Command: rp war
+
+Embed should show:
+
+- Attacker vs Defender
+- Allies on both sides
+- War duration (days/months/years)
+- War score (both sides)
+
+Example:
+UK: 55% vs Germany: 45%
+
+Also show:
+- Occupied provinces
+- Active battles
+- Total armies involved
+
+--------------------------------------------------
+
+ADD BUTTONS:
+
+[ Surrender ] (red)
+[ Ceasefire ] (grey)
+[ Proclaim Victory ] (green)
+
+--------------------------------------------------
+4. WAR BUTTON LOGIC
+--------------------------------------------------
+
+SURRENDER:
+- condition: war score < 15%
+- effect: enemy gets full victory rights
+- war ends
+
+--------------------------------------------------
+
+CEASEFIRE:
+- condition: war score ≥ 15%
+- send request to enemy
+- enemy sees: Accept / Decline
+- if accepted → war ends (no territory change)
+
+--------------------------------------------------
+
+PROCLAIM VICTORY:
+- condition: war score > 80%
+- open new embed with options:
+
+OPTIONS:
+- Occupy provinces (10–20 score each)
+- Puppet state (very high score)
+- Insult (20–30 score, +5 opinion, -10 diplomacy)
+- War reparations:
+    enemy: -20% economy efficiency (2 years)
+    winner: +1.5 daily income (2 years)
+
+--------------------------------------------------
+5. CALL ALLIES
+--------------------------------------------------
+
+Command: rp call_allies / rp ca
+
+- show allied countries (checkbox multi-select)
+
+After selection:
+- send join request to those players
+- ping owners
+
+Buttons:
+[ Join War ] / [ Decline ]
+
+If accepted:
+- add to war allies list
+- update rp war display
+
+--------------------------------------------------
+6. ARMY MOVEMENT
+--------------------------------------------------
+
+Command: rp move_unit
+
+STEP 1:
+- select army units (checkbox)
+
+STEP 2:
+- select destination province
+
+Allow:
+- own provinces
+- enemy provinces (only if war active)
+
+--------------------------------------------------
+
+MOVEMENT RULE:
+
+travel_time = provinces_crossed × 7 days
+
+Distance:
+= provinces in your country + provinces in enemy country
+
+--------------------------------------------------
+
+SPEED MODIFIERS:
+
+- cavalry present → -10% time
+- tanks present → +10% time
+- artillery present → +10% time
+
+--------------------------------------------------
+
+While moving:
+- status = "moving"
+- cannot fight
+
+--------------------------------------------------
+7. BATTLE SYSTEM
+--------------------------------------------------
+
+Battle starts when:
+- enemy armies in same province
+
+--------------------------------------------------
+
+Each army has:
+- total_points
+- strength (50%–120%)
+
+--------------------------------------------------
+
+POWER:
+
+power = total_points × (strength / 100)
+
+--------------------------------------------------
+
+DAILY DAMAGE:
+
+damage =
+(your_power / enemy_power) × random(0.8–1.2)
+
+Apply as % loss
+
+--------------------------------------------------
+
+SURRENDER RULE:
+
+If army < 30%:
+
+FIRST TIME:
+- retreat to original province
+
+SECOND TIME:
+- fully destroyed
+
+--------------------------------------------------
+
+WAR SCORE:
+
+Battle win:
++5% / -5%
+
+Army destroyed:
++10% / -10%
+
+--------------------------------------------------
+8. PROVINCE OCCUPATION
+--------------------------------------------------
+
+If no enemy:
+
+- occupation timer = 15 days
+
+After:
+- province occupied
+
+War score:
++2% / -2%
+
+--------------------------------------------------
+
+DE-OCCUPATION:
+
+- remove occupation
+- reverse score
+
+--------------------------------------------------
+9. STRENGTH SYSTEM
+--------------------------------------------------
+
+Range: 50%–120%
+Base: 100%
+
+--------------------------------------------------
+
+SUPPLY:
+
+No ammo:
+-10% per month
+
+No food:
+-20% per month
+
+No medicine:
+-15% per month
+
+--------------------------------------------------
+
+OPINION:
+
+>80:
++5% per month
+
+<40:
+-5% per month
+
+--------------------------------------------------
+
+MOVEMENT:
+
+moving:
+-5%
+
+arrival:
+-10% first battle tick
+
+--------------------------------------------------
+
+TERRITORY:
+
+own province:
++5%
+
+--------------------------------------------------
+
+RECOVERY:
+
+If army reaches original province:
+- fully recover to 100% in 3 months
+
+--------------------------------------------------
+10. CONSUMPTION SYSTEM
+--------------------------------------------------
+
+Every 10 days (war only):
+
+Consumption = ceil(total_army_population / 1000)
+
+Apply to:
+- food (prefer meat)
+- ammunition
+- medicines
+
+--------------------------------------------------
+11. RECRUITMENT TIME FIX
+--------------------------------------------------
+
+Recruitment time:
+
+total_time = MAX(unit times)
+
+DO NOT multiply by amount
+
+--------------------------------------------------
+12. RECRUITMENT SESSION FIX
+--------------------------------------------------
+
+Maintain session:
+
+session["units"] = {
+    "F1": 30,
+    "S2": 20
+}
+
+Do NOT overwrite previous selections
+
+--------------------------------------------------
+13. WAR END
+--------------------------------------------------
+
+War ends when:
+- surrender
+- ceasefire accepted
+- victory executed
+
+Set:
+war_active = False
+
+--------------------------------------------------
+INTEGRATION
+--------------------------------------------------
+
+Use:
+- army system
+- population system
+- economy system
+- diplomacy system
+- province system
+- tick system

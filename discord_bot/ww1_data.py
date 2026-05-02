@@ -1419,3 +1419,212 @@ def fmt_pop(n: int | float) -> str:
     if n >= 1_000:
         return f"{n/1_000:.0f}K"
     return str(n)
+
+
+# ── War / Army / Battle / Occupation System helpers ───────────────────────────
+
+_shared_war_db:     object = None
+_war_system_cache:  object = None
+_army_system_cache: object = None
+_battle_sys_cache:  object = None
+_occ_sys_cache:     object = None
+
+
+def _get_shared_war_db():
+    global _shared_war_db
+    if _shared_war_db is None:
+        from ww1_economy.db import EconomyDB
+        _shared_war_db = EconomyDB(DB_PATH)
+        _shared_war_db.init()
+    return _shared_war_db
+
+
+def _get_war_system():
+    global _war_system_cache
+    if _war_system_cache is None:
+        from ww1_economy.diplomacy_system import DiplomacySystem
+        from ww1_economy.war_system import WarSystem
+        db = _get_shared_war_db()
+        _war_system_cache = WarSystem(db, DiplomacySystem(db))
+    return _war_system_cache
+
+
+def _get_army_system():
+    global _army_system_cache
+    if _army_system_cache is None:
+        from ww1_economy.army_system import ArmySystem
+        _army_system_cache = ArmySystem(_get_shared_war_db())
+    return _army_system_cache
+
+
+def _get_battle_system():
+    global _battle_sys_cache
+    if _battle_sys_cache is None:
+        from ww1_economy.battle_system import BattleSystem
+        _battle_sys_cache = BattleSystem(
+            _get_shared_war_db(), _get_army_system(), _get_war_system()
+        )
+    return _battle_sys_cache
+
+
+def _get_occupation_system():
+    global _occ_sys_cache
+    if _occ_sys_cache is None:
+        from ww1_economy.occupation_system import OccupationSystem
+        _occ_sys_cache = OccupationSystem(_get_shared_war_db(), _get_war_system())
+    return _occ_sys_cache
+
+
+def war_declare(attacker: str, defender: str, game_day: int) -> dict:
+    """Declare war. Returns {ok, war_id, message}."""
+    res = _get_war_system().declare_war(SERVER_ID, SCENARIO_ID, attacker, defender, game_day)
+    if res.ok:
+        db = _get_shared_war_db()
+        for cid in (attacker, defender):
+            row = db.get_country(SERVER_ID, SCENARIO_ID, cid)
+            if row:
+                new_opinion = max(0, int(row.get("population_opinion") or 50) - 10)
+                new_eff     = max(0.5, float(row.get("economy_efficiency") or 1.0) - 0.10)
+                db.update_country_fields(
+                    SERVER_ID, SCENARIO_ID, cid,
+                    population_opinion=new_opinion,
+                    economy_efficiency=new_eff,
+                    in_active_war=1,
+                    war_start_month=game_day // 30,
+                )
+    return {"ok": res.ok, "war_id": res.war_id, "message": res.message}
+
+
+def war_request_ceasefire(war_id: str, country_id: str) -> dict:
+    res = _get_war_system().request_ceasefire(war_id, country_id)
+    return {"ok": res.ok, "message": res.message}
+
+
+def war_accept_ceasefire(war_id: str, country_id: str) -> dict:
+    res = _get_war_system().accept_ceasefire(war_id, country_id)
+    return {"ok": res.ok, "message": res.message}
+
+
+def war_surrender(war_id: str, country_id: str) -> dict:
+    res = _get_war_system().surrender(war_id, country_id)
+    return {"ok": res.ok, "victory_score": res.victory_score, "message": res.message}
+
+
+def war_proclaim_victory(war_id: str, country_id: str) -> dict:
+    res = _get_war_system().proclaim_victory(war_id, country_id)
+    return {"ok": res.ok, "victory_score": res.victory_score, "message": res.message}
+
+
+def war_add_ally(war_id: str, country_id: str, side: str) -> dict:
+    msg = _get_war_system().add_ally_to_war(war_id, SERVER_ID, SCENARIO_ID, country_id, side)
+    ok  = "not found" not in msg.lower() and "is not active" not in msg.lower()
+    return {"ok": ok, "message": msg}
+
+
+def war_move_army(army_id: str, dest_province_id: str,
+                  provinces_to_traverse: int, game_day: int) -> dict:
+    """Order an army to move. Returns {ok, travel_days, arrival_day, message}."""
+    res = _get_army_system().move_army(
+        army_id, dest_province_id, provinces_to_traverse,
+        game_day, SERVER_ID, SCENARIO_ID,
+    )
+    return {
+        "ok":          res.ok,
+        "travel_days": res.travel_days,
+        "arrival_day": res.arrival_day,
+        "message":     res.message,
+    }
+
+
+def get_war_details(war_id: str) -> dict | None:
+    """Full war record with participants and occupations."""
+    db  = _get_shared_war_db()
+    war = db.get_war(war_id)
+    if war is None:
+        return None
+    participants = db.get_war_participants(war_id)
+    occupations  = db.get_war_occupations(war_id)
+    return {
+        "war":          dict(war),
+        "participants": [dict(p) for p in participants],
+        "occupations":  [dict(o) for o in occupations],
+    }
+
+
+def get_country_armies(country_id: str) -> list[dict]:
+    """Return all non-destroyed armies for a country with province name and army number."""
+    with _conn() as con:
+        rows = con.execute(
+            "SELECT a.army_id, a.province_id, a.state, a.strength_pct, a.rowid, "
+            "       p.province_name "
+            "FROM armies a "
+            "LEFT JOIN provinces p "
+            "  ON p.province_id=a.province_id "
+            "  AND p.server_id=a.server_id AND p.scenario_id=a.scenario_id "
+            "WHERE a.server_id=? AND a.scenario_id=? AND a.country_id=? "
+            "  AND a.state NOT IN ('destroyed') "
+            "ORDER BY a.rowid",
+            (SERVER_ID, SCENARIO_ID, country_id),
+        ).fetchall()
+    result = []
+    for i, r in enumerate(rows, start=1):
+        d = dict(r)
+        d["army_num"] = i
+        result.append(d)
+    return result
+
+
+def get_all_provinces_list(owner_country: str | None = None,
+                            enemy_countries: list[str] | None = None) -> list[dict]:
+    """Return provinces for a movement UI — own first, then enemy, capped at 25."""
+    with _conn() as con:
+        rows = con.execute(
+            "SELECT province_id, province_name, owner_country "
+            "FROM provinces "
+            "WHERE server_id=? AND scenario_id=? "
+            "ORDER BY province_name",
+            (SERVER_ID, SCENARIO_ID),
+        ).fetchall()
+    all_provs = [dict(r) for r in rows]
+
+    own     = [p for p in all_provs if owner_country and p["owner_country"] == owner_country]
+    enemies = [p for p in all_provs
+               if enemy_countries and p["owner_country"] in enemy_countries
+               and p not in own]
+    others  = [p for p in all_provs if p not in own and p not in enemies]
+    return (own + enemies + others)[:25]
+
+
+def get_war_between(country_a: str, country_b: str) -> dict | None:
+    """Return the first active war that has both countries on opposing sides."""
+    with _conn() as con:
+        wars = con.execute(
+            "SELECT * FROM wars WHERE server_id=? AND scenario_id=? AND status='active'",
+            (SERVER_ID, SCENARIO_ID),
+        ).fetchall()
+        for w in wars:
+            w = dict(w)
+            parts = con.execute(
+                "SELECT country_id, side FROM war_participants WHERE war_id=?",
+                (w["war_id"],),
+            ).fetchall()
+            sides: dict[str, str] = {
+                w["attacker"]: "attacker",
+                w["defender"]: "defender",
+            }
+            for p in parts:
+                sides[p["country_id"]] = p["side"]
+            if (country_a in sides and country_b in sides
+                    and sides[country_a] != sides[country_b]):
+                return w
+    return None
+
+
+def get_active_wars_all() -> list[dict]:
+    """All active wars in the scenario."""
+    with _conn() as con:
+        rows = con.execute(
+            "SELECT * FROM wars WHERE server_id=? AND scenario_id=? AND status='active'",
+            (SERVER_ID, SCENARIO_ID),
+        ).fetchall()
+    return [dict(r) for r in rows]

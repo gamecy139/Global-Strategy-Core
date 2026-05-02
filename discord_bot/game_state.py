@@ -312,6 +312,16 @@ def get_user_country(guild_id: str, user_id: str) -> str | None:
     return row["country_id"] if row else None
 
 
+def get_country_owner_id(guild_id: str, country_id: str) -> str | None:
+    """Return the user_id of the player controlling country_id, or None."""
+    with _conn() as con:
+        row = con.execute(
+            "SELECT user_id FROM country_assignments WHERE guild_id=? AND country_id=?",
+            (guild_id, country_id),
+        ).fetchone()
+    return row["user_id"] if row else None
+
+
 # ── Investment helpers ────────────────────────────────────────────────────────
 
 def get_investment(guild_id: str, country_id: str) -> dict:

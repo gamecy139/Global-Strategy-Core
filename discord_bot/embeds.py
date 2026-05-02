@@ -83,6 +83,10 @@ def help_embed() -> discord.Embed:
         ("rp recruit_army / rp ra",       "Recruit an army in one of your provinces."),
         ("rp edit_diplomacy / rp ed",     "Manage diplomatic actions (improve, damage, war, alliance, gift, rivalry)."),
         ("rp check_diplomacy / rp cd",    "View your diplomacy overview and inspect per-country relations."),
+        ("rp declare_war `<country>`",    "Declare war on another country (also: rp dw)."),
+        ("rp war",                        "View active wars with ceasefire / surrender / victory controls."),
+        ("rp call_allies / rp ca",        "Call an allied country into one of your wars."),
+        ("rp move_unit",                  "Order an army to march to a province (also: rp move)."),
     ]
     for name, desc in cmds:
         e.add_field(name=f"`{name}`", value=desc, inline=False)
@@ -1348,4 +1352,210 @@ def diplo_help_entries() -> list[tuple[str, str]]:
     return [
         ("rp edit_diplomacy / rp ed", "Manage diplomatic actions (improve, damage, war, alliance, gift, rivalry)."),
         ("rp check_diplomacy / rp cd", "View your diplomatic overview and inspect relations with specific countries."),
+    ]
+
+
+# ── War embeds ────────────────────────────────────────────────────────────────
+
+def war_declare_embed(
+    attacker_name: str,
+    defender_name: str,
+    war_id: str,
+    date_str: str,
+) -> discord.Embed:
+    e = _base(
+        f"⚔️  War Declared!",
+        (
+            f"**{attacker_name}** has declared war on **{defender_name}**!\n\n"
+            f"Both nations brace for conflict. War score starts at **50 — 50**.\n"
+            f"Use `rp move_unit` to march your armies and `rp war` to track progress."
+        ),
+        COL_RED,
+    )
+    e.add_field(name="War ID", value=f"`{war_id}`", inline=True)
+    e.add_field(name="Date", value=date_str, inline=True)
+    e.set_footer(text="WW1 Roleplay  •  prefix: rp  •  ⚠️ Economy efficiency −10% • Opinion −10")
+    return e
+
+
+def war_status_embed(
+    war: dict,
+    participants: list[dict],
+    occupations: list[dict],
+    date_str: str,
+    name_map: dict[str, str],   # country_id → country_name
+) -> discord.Embed:
+    att_id = war["attacker"]
+    def_id = war["defender"]
+    att_score = float(war.get("war_score_attacker") or 50)
+    def_score = float(war.get("war_score_defender") or 50)
+
+    att_name = name_map.get(att_id, att_id)
+    def_name = name_map.get(def_id, def_id)
+
+    # Score bars (10 blocks each)
+    att_blocks = round(att_score / 10)
+    def_blocks = round(def_score / 10)
+    att_bar = "█" * att_blocks + "░" * (10 - att_blocks)
+    def_bar = "█" * def_blocks + "░" * (10 - def_blocks)
+
+    desc_lines = [
+        f"**⚔️  {att_name}  vs  {def_name}**",
+        "",
+        f"🟥 **{att_name}**  `[{att_bar}]`  **{att_score:.0f}**",
+        f"🟦 **{def_name}**  `[{def_bar}]`  **{def_score:.0f}**",
+    ]
+
+    # Allies
+    att_allies = [name_map.get(p["country_id"], p["country_id"])
+                  for p in participants
+                  if p["side"] == "attacker" and not p.get("is_leader")]
+    def_allies = [name_map.get(p["country_id"], p["country_id"])
+                  for p in participants
+                  if p["side"] == "defender" and not p.get("is_leader")]
+    if att_allies:
+        desc_lines.append(f"  Allies: {', '.join(att_allies)}")
+    if def_allies:
+        desc_lines.append(f"  Allies: {', '.join(def_allies)}")
+
+    # Occupied provinces
+    occupied = [o for o in occupations if o.get("is_occupied")]
+    if occupied:
+        desc_lines.append("")
+        desc_lines.append("🏳️  **Occupied Provinces:**")
+        for o in occupied[:8]:
+            occ_name = name_map.get(o["occupying_country"], o["occupying_country"])
+            desc_lines.append(f"  • `{o['province_id']}` → {occ_name}")
+        if len(occupied) > 8:
+            desc_lines.append(f"  … and {len(occupied)-8} more")
+
+    # Ceasefire request
+    cf_by = war.get("ceasefire_requested_by")
+    if cf_by:
+        cf_name = name_map.get(cf_by, cf_by)
+        desc_lines.append("")
+        desc_lines.append(f"🕊️  **{cf_name}** has requested a ceasefire.")
+
+    # Victory hint
+    desc_lines.append("")
+    if att_score >= 80:
+        desc_lines.append(f"✅ **{att_name}** can proclaim victory (score ≥ 80).")
+    elif att_score <= 15:
+        desc_lines.append(f"🏳️  **{att_name}** may surrender (score ≤ 15).")
+    if def_score >= 80:
+        desc_lines.append(f"✅ **{def_name}** can proclaim victory (score ≥ 80).")
+    elif def_score <= 15:
+        desc_lines.append(f"🏳️  **{def_name}** may surrender (score ≤ 15).")
+
+    e = _base(
+        f"War Status  •  {date_str}",
+        "\n".join(desc_lines),
+        COL_RED,
+    )
+    e.add_field(name="War ID", value=f"`{war['war_id']}`", inline=True)
+    e.add_field(name="Status", value=war.get("status", "active").title(), inline=True)
+    return e
+
+
+def war_list_embed(
+    wars: list[dict],
+    country_name: str,
+    date_str: str,
+) -> discord.Embed:
+    if not wars:
+        return _base(
+            f"⚔️  {country_name} — No Active Wars",
+            "Your country is at peace. Use `rp declare_war <country>` to start a war.",
+            COL_GREY,
+        )
+    lines = []
+    for w in wars:
+        att_score = float(w.get("war_score_attacker") or 50)
+        def_score = float(w.get("war_score_defender") or 50)
+        lines.append(
+            f"**`{w['war_id'][:8]}…`**  {w['attacker']} vs {w['defender']}"
+            f"  |  Score: {att_score:.0f}–{def_score:.0f}"
+        )
+    return _base(
+        f"⚔️  {country_name} — Active Wars  ({date_str})",
+        "\n".join(lines),
+        COL_RED,
+    )
+
+
+def war_action_result_embed(title: str, message: str, ok: bool) -> discord.Embed:
+    colour = COL_GREEN if ok else COL_RED
+    icon   = "✅" if ok else "❌"
+    return _base(f"{icon}  {title}", message, colour)
+
+
+def move_army_embed(
+    country_name: str,
+    armies: list[dict],
+    date_str: str,
+) -> discord.Embed:
+    if not armies:
+        return _base(
+            f"🪖  {country_name} — No Armies",
+            "You have no armies available to move. Recruit one with `rp recruit`.",
+            COL_GREY,
+        )
+    lines = []
+    for a in armies:
+        prov  = a.get("province_name") or a.get("province_id") or "?"
+        state = a.get("state", "?")
+        str_  = float(a.get("strength_pct") or 100)
+        lines.append(
+            f"**Army #{a['army_num']}** — in `{prov}` | "
+            f"State: {state} | Str: {str_:.0f}%"
+        )
+    return _base(
+        f"🪖  {country_name} — Select Army to Move  ({date_str})",
+        "\n".join(lines) + "\n\nUse the dropdown below to select an army.",
+        COL_GOLD,
+    )
+
+
+def move_confirm_embed(
+    army_label: str,
+    dest_name: str,
+    travel_days: int,
+    arrival_date: str,
+) -> discord.Embed:
+    return _base(
+        "🗺️  Confirm March Orders",
+        (
+            f"**Army:** {army_label}\n"
+            f"**Destination:** {dest_name}\n"
+            f"**Travel Time:** {travel_days} days\n"
+            f"**Estimated Arrival:** {arrival_date}"
+        ),
+        COL_GOLD,
+    )
+
+
+def call_allies_embed(
+    country_name: str,
+    allies: list[str],
+    date_str: str,
+) -> discord.Embed:
+    if not allies:
+        return _base(
+            f"🤝  {country_name} — No Allies",
+            "You have no allies to call. Form an alliance first via `rp edit_diplomacy`.",
+            COL_GREY,
+        )
+    return _base(
+        f"🤝  {country_name} — Call Allies  ({date_str})",
+        "Select an ally and the war you wish them to join.",
+        COL_BLUE,
+    )
+
+
+def war_help_entries() -> list[tuple[str, str]]:
+    return [
+        ("rp declare_war <country>", "Declare war on another country."),
+        ("rp war",                   "View your active wars with ceasefire/surrender/victory controls."),
+        ("rp call_allies / rp ca",   "Call an allied country into one of your wars."),
+        ("rp move_unit",             "Order an army to march to a new province."),
     ]

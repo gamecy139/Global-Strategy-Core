@@ -79,6 +79,112 @@ def _get_all_assigned_countries(guild_id: str) -> list[str]:
 
 # ── Main tick task ────────────────────────────────────────────────────────────
 
+_military_systems_cache = None
+
+
+def _get_military_systems():
+    """Return (db, war_sys, army_sys, battle_sys, occ_sys) — lazily cached."""
+    global _military_systems_cache
+    if _military_systems_cache is None:
+        from ww1_economy.db               import EconomyDB
+        from ww1_economy.diplomacy_system  import DiplomacySystem
+        from ww1_economy.war_system        import WarSystem
+        from ww1_economy.army_system       import ArmySystem
+        from ww1_economy.battle_system     import BattleSystem
+        from ww1_economy.occupation_system import OccupationSystem
+        db  = EconomyDB(WW1_DB)
+        db.init()
+        dip = DiplomacySystem(db)
+        war = WarSystem(db, dip)
+        arm = ArmySystem(db)
+        bat = BattleSystem(db, arm, war)
+        occ = OccupationSystem(db, war)
+        _military_systems_cache = (db, war, arm, bat, occ)
+    return _military_systems_cache
+
+
+def _process_military_tick(new_game_day: int) -> None:
+    """
+    Run every game day:
+      1. Finish movement — armies that have arrived move to their destination.
+      2. Trigger battles — if enemy armies share a province.
+      3. Tick active battles.
+      4. Tick province occupations (per active war).
+      5. Consume supply (per active war).
+    Battle/occupation/supply events are logged; no channel messages here
+    (channel notifications can be wired later via a bot reference).
+    """
+    db, war_sys, army_sys, bat_sys, occ_sys = _get_military_systems()
+
+    # 1 — Movement arrivals
+    arrivals = army_sys.process_movement(SERVER_ID, SCENARIO_ID, new_game_day)
+    for evt in arrivals:
+        log.info("Army %s arrived at '%s' (country %s).",
+                 evt.army_id[:8], evt.province_id, evt.country_id)
+
+        # Check if the province is enemy-owned → start occupation
+        from discord_bot.ww1_data import get_war_between
+        import sqlite3 as _sql
+        _con = _sql.connect(WW1_DB)
+        _con.row_factory = _sql.Row
+        prov = _con.execute(
+            "SELECT owner_country FROM provinces "
+            "WHERE server_id=? AND scenario_id=? AND province_id=?",
+            (SERVER_ID, SCENARIO_ID, evt.province_id),
+        ).fetchone()
+        _con.close()
+
+        if prov and prov["owner_country"] and prov["owner_country"] != evt.country_id:
+            owner_id = prov["owner_country"]
+            w = get_war_between(evt.country_id, owner_id)
+            if w:
+                occ_evt = occ_sys.start_occupation(
+                    SERVER_ID, SCENARIO_ID, evt.province_id,
+                    w["war_id"], evt.country_id, new_game_day,
+                )
+                log.info("Occupation started: %s by %s (war %s).",
+                         evt.province_id, evt.country_id, w["war_id"][:8])
+
+                # Check for enemy army in same province → trigger battle
+                enemy_armies = [
+                    a for a in db.get_armies_in_province(SERVER_ID, SCENARIO_ID, evt.province_id)
+                    if a["country_id"] != evt.country_id
+                    and a["state"] not in ("destroyed", "moving")
+                ]
+                if enemy_armies:
+                    trig = bat_sys.trigger_battle(
+                        SERVER_ID, SCENARIO_ID, w["war_id"],
+                        evt.army_id, enemy_armies[0]["army_id"],
+                        evt.province_id, new_game_day,
+                    )
+                    log.info("Battle trigger: %s", trig.message)
+
+    # 2 — Tick active battles
+    battle_result = bat_sys.process_all_battles(SERVER_ID, SCENARIO_ID, new_game_day)
+    for tick in battle_result.events:
+        log.info("Battle tick: %s", tick.message)
+
+    # 3 — Tick province occupations for every active war
+    active_wars = db.get_active_wars(SERVER_ID, SCENARIO_ID)
+    for w in active_wars:
+        occ_result = occ_sys.process_occupations(
+            SERVER_ID, SCENARIO_ID, w["war_id"], new_game_day
+        )
+        for oe in occ_result.completed:
+            log.info("Province fully occupied: %s by %s%s.",
+                     oe.province_id, oe.occupying_country,
+                     f" ({oe.war_score_event})" if oe.war_score_event else "")
+
+        # 4 — Supply consumption (needs war start day)
+        war_start = int(w.get("start_day") or 0)
+        supply_results = army_sys.process_all_supply(
+            SERVER_ID, SCENARIO_ID, new_game_day, war_start
+        )
+        for sr in supply_results:
+            if not (sr.food_met and sr.ammo_met and sr.medicine_met):
+                log.info("Supply shortage — army %s: %s", sr.army_id[:8], sr.message)
+
+
 @tasks.loop(seconds=10)
 async def tick_task() -> None:
     ts = _get_tick_system()
@@ -145,6 +251,12 @@ async def tick_task() -> None:
             _con.close()
         except Exception as e:
             log.warning("Army graduation error: %s", e)
+
+        # ── Military tick: movement, battles, occupation, supply ──────────────
+        try:
+            _process_military_tick(new_game_day)
+        except Exception as e:
+            log.warning("Military tick error: %s", e)
 
         # ── Monthly tick: consumption → production → market → efficiency ───────
         month_before   = game_day_before  // game_state.DAYS_PER_MONTH
