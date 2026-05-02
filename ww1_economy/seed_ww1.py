@@ -48,7 +48,7 @@ class CountrySeed(NamedTuple):
 # ---------------------------------------------------------------------------
 
 SCENARIO_DATA: list[CountrySeed] = [
-    CountrySeed("germany", "Germany", [
+    CountrySeed("germany", "German Empire", [
         ProvinceSeed(  1, "Rhineland",            "coal",   5000),
         ProvinceSeed(  2, "Ruhr",                 "iron",   6000),
         ProvinceSeed(  3, "Saarland",             "coal",   1200),

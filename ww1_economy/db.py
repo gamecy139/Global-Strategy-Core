@@ -55,6 +55,7 @@ _COUNTRY_COLUMNS: frozenset[str] = frozenset({
     "in_active_war",
     "population_opinion",
     "unrest",
+    "population_growth_rate",
 })
 
 _MARKET_COLUMNS: frozenset[str] = frozenset({
@@ -231,14 +232,15 @@ class EconomyDB:
     def _migrate_countries(conn: sqlite3.Connection) -> None:
         cols = {row[1] for row in conn.execute("PRAGMA table_info(countries)")}
         new_cols: list[tuple[str, str]] = [
-            ("treasury",              "REAL    NOT NULL DEFAULT 0.0"),
-            ("daily_base_income",     "REAL    NOT NULL DEFAULT 0.0"),
-            ("tax_multiplier",        "REAL    NOT NULL DEFAULT 1.0"),
-            ("economy_efficiency",    "REAL    NOT NULL DEFAULT 1.0"),
-            ("war_victory_end_month", "INTEGER NOT NULL DEFAULT 0"),
-            ("in_active_war",         "INTEGER NOT NULL DEFAULT 0"),
-            ("population_opinion",    "INTEGER NOT NULL DEFAULT 50"),
-            ("unrest",                "REAL    NOT NULL DEFAULT 0.0"),
+            ("treasury",                "REAL    NOT NULL DEFAULT 0.0"),
+            ("daily_base_income",       "REAL    NOT NULL DEFAULT 0.0"),
+            ("tax_multiplier",          "REAL    NOT NULL DEFAULT 1.0"),
+            ("economy_efficiency",      "REAL    NOT NULL DEFAULT 1.0"),
+            ("war_victory_end_month",   "INTEGER NOT NULL DEFAULT 0"),
+            ("in_active_war",           "INTEGER NOT NULL DEFAULT 0"),
+            ("population_opinion",      "INTEGER NOT NULL DEFAULT 50"),
+            ("unrest",                  "REAL    NOT NULL DEFAULT 0.0"),
+            ("population_growth_rate",  "REAL    NOT NULL DEFAULT 0.6"),
         ]
         for name, typedef in new_cols:
             if name not in cols:

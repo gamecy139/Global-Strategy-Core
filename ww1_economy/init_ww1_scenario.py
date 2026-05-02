@@ -40,7 +40,7 @@ DEFAULT_DB  = os.environ.get("WW1_DB_PATH", "ww1_scenario.db")
 
 COUNTRY_CONFIG: list[dict] = [
     # Tier 1
-    dict(country_id="germany",         religion="Protestant Christian",  treasury=600.0, daily_income=8.0, opinion=70, tier=1),
+    dict(country_id="germany",         religion="Protestant Christian",  treasury=600.0, daily_income=8.0, opinion=70, tier=1),  # German Empire
     dict(country_id="united_kingdom",  religion="Protestant Christian",  treasury=500.0, daily_income=7.0, opinion=55, tier=1),
     dict(country_id="france",          religion="Atheism",               treasury=320.0, daily_income=5.0, opinion=60, tier=1),
     # Tier 2

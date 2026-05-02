@@ -1,6 +1,6 @@
 """
-Lightweight SQLite store for per-guild game sessions and country assignments.
-Completely independent of the ww1_economy DB.
+SQLite store for per-guild game sessions, speed settings, and country assignments.
+All data persists across bot restarts — nothing is held only in memory.
 """
 from __future__ import annotations
 
@@ -9,6 +9,17 @@ import time
 from contextlib import contextmanager
 
 DB_PATH = "bot_state.db"
+
+SPEED_OPTIONS: list[dict] = [
+    {"label": "⏸  Paused",     "value": "paused",     "desc": "Time is frozen."},
+    {"label": "🐢  Slow (1×)",  "value": "1x",         "desc": "1 game-day per real day."},
+    {"label": "🚶  Normal (2×)", "value": "2x",         "desc": "2 game-days per real day."},
+    {"label": "🏃  Fast (3×)",  "value": "3x",         "desc": "3 game-days per real day."},
+    {"label": "⚡  Very Fast (4×)", "value": "4x",     "desc": "4 game-days per real day."},
+    {"label": "🔥  Maximum (5×)", "value": "5x",       "desc": "5 game-days per real day."},
+]
+DEFAULT_SPEED = "1x"
+GAME_START_YEAR = 1910
 
 
 @contextmanager
@@ -30,9 +41,15 @@ def init() -> None:
                 guild_id    TEXT NOT NULL PRIMARY KEY,
                 scenario_id TEXT NOT NULL DEFAULT 'ww1',
                 channel_id  TEXT NOT NULL,
-                started_at  INTEGER NOT NULL
+                started_at  INTEGER NOT NULL,
+                game_speed  TEXT NOT NULL DEFAULT '1x',
+                game_day    INTEGER NOT NULL DEFAULT 0
             )
         """)
+        # Migrations for existing DBs
+        _add_col_if_missing(con, "game_sessions", "game_speed", "TEXT NOT NULL DEFAULT '1x'")
+        _add_col_if_missing(con, "game_sessions", "game_day",   "INTEGER NOT NULL DEFAULT 0")
+
         con.execute("""
             CREATE TABLE IF NOT EXISTS country_assignments (
                 guild_id    TEXT NOT NULL,
@@ -53,17 +70,27 @@ def init() -> None:
         """)
 
 
+def _add_col_if_missing(con: sqlite3.Connection, table: str,
+                         col: str, typedef: str) -> None:
+    cols = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
+    if col not in cols:
+        con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typedef}")
+
+
 # ── Session helpers ───────────────────────────────────────────────────────────
 
 def start_game(guild_id: str, channel_id: str, scenario_id: str = "ww1") -> None:
     with _conn() as con:
         con.execute("""
-            INSERT INTO game_sessions (guild_id, scenario_id, channel_id, started_at)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO game_sessions
+                (guild_id, scenario_id, channel_id, started_at, game_speed, game_day)
+            VALUES (?, ?, ?, ?, ?, 0)
             ON CONFLICT(guild_id) DO UPDATE SET
                 scenario_id = excluded.scenario_id,
                 channel_id  = excluded.channel_id,
-                started_at  = excluded.started_at
+                started_at  = excluded.started_at,
+                game_speed  = '1x',
+                game_day    = 0
         """, (guild_id, scenario_id, channel_id, int(time.time())))
 
 
@@ -78,13 +105,30 @@ def is_game_running(guild_id: str) -> bool:
     return get_session(guild_id) is not None
 
 
+def set_speed(guild_id: str, speed_value: str) -> None:
+    with _conn() as con:
+        con.execute(
+            "UPDATE game_sessions SET game_speed=? WHERE guild_id=?",
+            (speed_value, guild_id),
+        )
+
+
+def get_speed(guild_id: str) -> str:
+    row = get_session(guild_id)
+    return row["game_speed"] if row else DEFAULT_SPEED
+
+
+def get_game_year(guild_id: str) -> int:
+    row = get_session(guild_id)
+    day = row["game_day"] if row else 0
+    return GAME_START_YEAR + (day // 365)
+
+
 # ── Country assignment helpers ────────────────────────────────────────────────
 
 def assign_country(guild_id: str, country_id: str,
                    user_id: str, user_name: str) -> str | None:
-    """
-    Assign country_id to user.  Returns None on success, or an error string.
-    """
+    """Returns None on success, or an error string."""
     with _conn() as con:
         existing = con.execute(
             "SELECT user_id, user_name FROM country_assignments "
@@ -121,7 +165,7 @@ def assign_country(guild_id: str, country_id: str,
 
 
 def get_assignments(guild_id: str) -> dict[str, str]:
-    """Returns {country_id: user_name} for the guild."""
+    """Returns {country_id: user_name}."""
     with _conn() as con:
         rows = con.execute(
             "SELECT country_id, user_name FROM country_assignments WHERE guild_id=?",
