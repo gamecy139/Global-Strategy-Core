@@ -1,5 +1,5 @@
 """
-SQLite store for per-guild game sessions, speed settings, and country assignments.
+SQLite store for per-guild game sessions, speed, tick clock, investments, and country assignments.
 All data persists across bot restarts — nothing is held only in memory.
 """
 from __future__ import annotations
@@ -11,15 +11,38 @@ from contextlib import contextmanager
 DB_PATH = "bot_state.db"
 
 SPEED_OPTIONS: list[dict] = [
-    {"label": "⏸  Paused",     "value": "paused",     "desc": "Time is frozen."},
-    {"label": "🐢  Slow (1×)",  "value": "1x",         "desc": "1 game-day per real day."},
-    {"label": "🚶  Normal (2×)", "value": "2x",         "desc": "2 game-days per real day."},
-    {"label": "🏃  Fast (3×)",  "value": "3x",         "desc": "3 game-days per real day."},
-    {"label": "⚡  Very Fast (4×)", "value": "4x",     "desc": "4 game-days per real day."},
-    {"label": "🔥  Maximum (5×)", "value": "5x",       "desc": "5 game-days per real day."},
+    {"label": "⏸  Paused",          "value": "paused", "desc": "Time is frozen."},
+    {"label": "🐢  Slow (1×)",       "value": "1x",     "desc": "1 game-day per real minute."},
+    {"label": "🚶  Normal (2×)",     "value": "2x",     "desc": "1 game-day per 30 real seconds."},
+    {"label": "🏃  Fast (3×)",       "value": "3x",     "desc": "1 game-day per 20 real seconds."},
+    {"label": "⚡  Very Fast (4×)",  "value": "4x",     "desc": "1 game-day per 15 real seconds."},
+    {"label": "🔥  Maximum (5×)",    "value": "5x",     "desc": "1 game-day per 10 real seconds."},
 ]
 DEFAULT_SPEED = "1x"
-GAME_START_YEAR = 1910
+
+# Real seconds required to pass for one game day to advance
+SPEED_SECS_PER_DAY: dict[str, float] = {
+    "paused": 0.0,
+    "1x":    60.0,
+    "2x":    30.0,
+    "3x":    20.0,
+    "4x":    15.0,
+    "5x":    10.0,
+}
+
+GAME_START_YEAR    = 1910
+DAYS_PER_MONTH     = 30
+MONTHS_PER_YEAR    = 12
+DAYS_PER_YEAR      = 360
+MONTH_NAMES        = [
+    "January","February","March","April","May","June",
+    "July","August","September","October","November","December",
+]
+
+BASE_GROWTH_RATE   = 0.6   # % per month
+MAX_GROWTH_RATE    = 2.0   # % per month cap
+GROWTH_STEP        = 0.05  # % per investment
+BASE_INVEST_COST   = 20.0  # gold for first investment
 
 
 @contextmanager
@@ -34,21 +57,29 @@ def _conn():
         con.close()
 
 
+def _add_col_if_missing(con: sqlite3.Connection, table: str,
+                         col: str, typedef: str) -> None:
+    cols = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
+    if col not in cols:
+        con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typedef}")
+
+
 def init() -> None:
     with _conn() as con:
         con.execute("""
             CREATE TABLE IF NOT EXISTS game_sessions (
-                guild_id    TEXT NOT NULL PRIMARY KEY,
-                scenario_id TEXT NOT NULL DEFAULT 'ww1',
-                channel_id  TEXT NOT NULL,
-                started_at  INTEGER NOT NULL,
-                game_speed  TEXT NOT NULL DEFAULT '1x',
-                game_day    INTEGER NOT NULL DEFAULT 0
+                guild_id         TEXT NOT NULL PRIMARY KEY,
+                scenario_id      TEXT NOT NULL DEFAULT 'ww1',
+                channel_id       TEXT NOT NULL,
+                started_at       INTEGER NOT NULL,
+                game_speed       TEXT NOT NULL DEFAULT '1x',
+                game_day         INTEGER NOT NULL DEFAULT 0,
+                last_tick_real_s REAL NOT NULL DEFAULT 0.0
             )
         """)
-        # Migrations for existing DBs
-        _add_col_if_missing(con, "game_sessions", "game_speed", "TEXT NOT NULL DEFAULT '1x'")
-        _add_col_if_missing(con, "game_sessions", "game_day",   "INTEGER NOT NULL DEFAULT 0")
+        _add_col_if_missing(con, "game_sessions", "game_speed",       "TEXT NOT NULL DEFAULT '1x'")
+        _add_col_if_missing(con, "game_sessions", "game_day",         "INTEGER NOT NULL DEFAULT 0")
+        _add_col_if_missing(con, "game_sessions", "last_tick_real_s", "REAL NOT NULL DEFAULT 0.0")
 
         con.execute("""
             CREATE TABLE IF NOT EXISTS country_assignments (
@@ -68,36 +99,53 @@ def init() -> None:
                 PRIMARY KEY (guild_id, user_id)
             )
         """)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS country_investments (
+                guild_id          TEXT NOT NULL,
+                country_id        TEXT NOT NULL,
+                growth_bonus      REAL NOT NULL DEFAULT 0.0,
+                next_invest_cost  REAL NOT NULL DEFAULT 20.0,
+                PRIMARY KEY (guild_id, country_id)
+            )
+        """)
 
 
-def _add_col_if_missing(con: sqlite3.Connection, table: str,
-                         col: str, typedef: str) -> None:
-    cols = {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
-    if col not in cols:
-        con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typedef}")
+# ── Calendar helpers ──────────────────────────────────────────────────────────
+
+def game_date_str(game_day: int) -> str:
+    day_of_month = (game_day % DAYS_PER_MONTH) + 1
+    month_idx    = (game_day // DAYS_PER_MONTH) % MONTHS_PER_YEAR
+    year         = GAME_START_YEAR + game_day // DAYS_PER_YEAR
+    return f"{day_of_month} {MONTH_NAMES[month_idx]}, {year}"
+
+
+def game_year_from_day(game_day: int) -> int:
+    return GAME_START_YEAR + game_day // DAYS_PER_YEAR
 
 
 # ── Session helpers ───────────────────────────────────────────────────────────
 
 def start_game(guild_id: str, channel_id: str, scenario_id: str = "ww1") -> None:
+    now = time.time()
     with _conn() as con:
         con.execute("""
             INSERT INTO game_sessions
-                (guild_id, scenario_id, channel_id, started_at, game_speed, game_day)
-            VALUES (?, ?, ?, ?, ?, 0)
+                (guild_id, scenario_id, channel_id, started_at, game_speed, game_day, last_tick_real_s)
+            VALUES (?, ?, ?, ?, '1x', 0, ?)
             ON CONFLICT(guild_id) DO UPDATE SET
-                scenario_id = excluded.scenario_id,
-                channel_id  = excluded.channel_id,
-                started_at  = excluded.started_at,
-                game_speed  = '1x',
-                game_day    = 0
-        """, (guild_id, scenario_id, channel_id, int(time.time())))
+                scenario_id      = excluded.scenario_id,
+                channel_id       = excluded.channel_id,
+                started_at       = excluded.started_at,
+                game_speed       = '1x',
+                game_day         = 0,
+                last_tick_real_s = excluded.last_tick_real_s
+        """, (guild_id, scenario_id, channel_id, int(now), now))
 
 
 def get_session(guild_id: str) -> sqlite3.Row | None:
     with _conn() as con:
         return con.execute(
-            "SELECT * FROM game_sessions WHERE guild_id = ?", (guild_id,)
+            "SELECT * FROM game_sessions WHERE guild_id=?", (guild_id,)
         ).fetchone()
 
 
@@ -105,11 +153,17 @@ def is_game_running(guild_id: str) -> bool:
     return get_session(guild_id) is not None
 
 
+def get_all_sessions() -> list[sqlite3.Row]:
+    with _conn() as con:
+        return con.execute("SELECT * FROM game_sessions").fetchall()
+
+
 def set_speed(guild_id: str, speed_value: str) -> None:
+    now = time.time()
     with _conn() as con:
         con.execute(
-            "UPDATE game_sessions SET game_speed=? WHERE guild_id=?",
-            (speed_value, guild_id),
+            "UPDATE game_sessions SET game_speed=?, last_tick_real_s=? WHERE guild_id=?",
+            (speed_value, now, guild_id),
         )
 
 
@@ -118,17 +172,66 @@ def get_speed(guild_id: str) -> str:
     return row["game_speed"] if row else DEFAULT_SPEED
 
 
-def get_game_year(guild_id: str) -> int:
+def get_game_day(guild_id: str) -> int:
     row = get_session(guild_id)
-    day = row["game_day"] if row else 0
-    return GAME_START_YEAR + (day // 365)
+    return row["game_day"] if row else 0
+
+
+def get_game_date(guild_id: str) -> str:
+    return game_date_str(get_game_day(guild_id))
+
+
+def get_game_year(guild_id: str) -> int:
+    return game_year_from_day(get_game_day(guild_id))
+
+
+def advance_tick(guild_id: str) -> tuple[int, int]:
+    """
+    Compute how many game days have elapsed since the last tick,
+    advance game_day, update last_tick_real_s.
+    Returns (days_advanced, new_game_day).
+    """
+    now = time.time()
+    row = get_session(guild_id)
+    if row is None:
+        return 0, 0
+
+    speed        = row["game_speed"]
+    secs_per_day = SPEED_SECS_PER_DAY.get(speed, 0.0)
+    last_tick    = row["last_tick_real_s"] or now
+    game_day     = row["game_day"]
+
+    if secs_per_day <= 0.0:
+        # Paused — update timestamp so it doesn't accumulate
+        with _conn() as con:
+            con.execute(
+                "UPDATE game_sessions SET last_tick_real_s=? WHERE guild_id=?",
+                (now, guild_id),
+            )
+        return 0, game_day
+
+    elapsed_secs  = now - last_tick
+    days_advanced = int(elapsed_secs / secs_per_day)
+
+    if days_advanced <= 0:
+        return 0, game_day
+
+    new_day = game_day + days_advanced
+    # Move last_tick forward by exactly the days we advanced (avoid drift)
+    new_last = last_tick + days_advanced * secs_per_day
+
+    with _conn() as con:
+        con.execute(
+            "UPDATE game_sessions SET game_day=?, last_tick_real_s=? WHERE guild_id=?",
+            (new_day, new_last, guild_id),
+        )
+    return days_advanced, new_day
 
 
 # ── Country assignment helpers ────────────────────────────────────────────────
 
 def assign_country(guild_id: str, country_id: str,
                    user_id: str, user_name: str) -> str | None:
-    """Returns None on success, or an error string."""
     with _conn() as con:
         existing = con.execute(
             "SELECT user_id, user_name FROM country_assignments "
@@ -165,7 +268,6 @@ def assign_country(guild_id: str, country_id: str,
 
 
 def get_assignments(guild_id: str) -> dict[str, str]:
-    """Returns {country_id: user_name}."""
     with _conn() as con:
         rows = con.execute(
             "SELECT country_id, user_name FROM country_assignments WHERE guild_id=?",
@@ -181,3 +283,29 @@ def get_user_country(guild_id: str, user_id: str) -> str | None:
             (guild_id, user_id),
         ).fetchone()
     return row["country_id"] if row else None
+
+
+# ── Investment helpers ────────────────────────────────────────────────────────
+
+def get_investment(guild_id: str, country_id: str) -> dict:
+    with _conn() as con:
+        row = con.execute(
+            "SELECT growth_bonus, next_invest_cost FROM country_investments "
+            "WHERE guild_id=? AND country_id=?",
+            (guild_id, country_id),
+        ).fetchone()
+    if row:
+        return {"growth_bonus": row["growth_bonus"], "next_invest_cost": row["next_invest_cost"]}
+    return {"growth_bonus": 0.0, "next_invest_cost": BASE_INVEST_COST}
+
+
+def save_investment(guild_id: str, country_id: str,
+                    growth_bonus: float, next_invest_cost: float) -> None:
+    with _conn() as con:
+        con.execute("""
+            INSERT INTO country_investments (guild_id, country_id, growth_bonus, next_invest_cost)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(guild_id, country_id) DO UPDATE SET
+                growth_bonus     = excluded.growth_bonus,
+                next_invest_cost = excluded.next_invest_cost
+        """, (guild_id, country_id, growth_bonus, next_invest_cost))

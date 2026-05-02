@@ -30,25 +30,30 @@ class RoleplayBot(commands.Bot):
         super().__init__(
             command_prefix="rp ",
             intents=INTENTS,
-            help_command=None,        # we provide our own rp help
+            help_command=None,
             case_insensitive=True,
         )
 
     async def setup_hook(self):
         game_state.init()
         await self.load_extension("discord_bot.cogs.game")
+        await self.load_extension("discord_bot.cogs.economy")
         log.info("Cogs loaded.")
 
     async def on_ready(self):
         await self.change_presence(
-            activity=discord.Game(name="rp help | WW1 Roleplay")
+            activity=discord.Game(name="rp help | WW1 Roleplay 1910")
         )
         log.info("Logged in as %s  (id=%s)", self.user, self.user.id)
         log.info("Serving %d guild(s).", len(self.guilds))
 
+        # Start the background tick loop
+        from discord_bot.tick_runner import start_tick
+        await start_tick(self)
+
     async def on_command_error(self, ctx: commands.Context, error):
         if isinstance(error, commands.CommandNotFound):
-            return          # silently ignore unknown rp sub-commands
+            return
         if isinstance(error, commands.MissingRequiredArgument):
             await ctx.send(
                 embed=discord.Embed(
@@ -65,7 +70,6 @@ async def main():
     if not TOKEN:
         log.error("DISCORD_TOKEN is not set. Add it to Replit Secrets.")
         return
-
     bot = RoleplayBot()
     async with bot:
         await bot.start(TOKEN)
