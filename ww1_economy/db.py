@@ -155,6 +155,7 @@ class EconomyDB:
             # Migrations
             self._migrate_buildings(conn)
             self._migrate_countries(conn)
+            self._migrate_armies(conn)
 
     # ---- DDL ---------------------------------------------------------
 
@@ -255,6 +256,14 @@ class EconomyDB:
                 conn.execute(
                     f"ALTER TABLE countries ADD COLUMN {name} {typedef}"
                 )
+
+    @staticmethod
+    def _migrate_armies(conn: sqlite3.Connection) -> None:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(armies)")}
+        if "recruitment_end_day" not in cols:
+            conn.execute(
+                "ALTER TABLE armies ADD COLUMN recruitment_end_day INTEGER NOT NULL DEFAULT 0"
+            )
 
     @staticmethod
     def _create_country_storage(conn: sqlite3.Connection) -> None:
@@ -2140,7 +2149,7 @@ class EconomyDB:
             "province_id", "state", "strength_pct", "base_province_id",
             "last_supply_day", "destination_province_id",
             "movement_start_day", "movement_end_day", "provinces_traversed",
-            "country_id",
+            "country_id", "recruitment_end_day",
         }
         bad = set(fields) - allowed
         if bad:

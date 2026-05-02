@@ -107,6 +107,45 @@ async def tick_task() -> None:
         except Exception as e:
             log.warning("Daily tick error: %s", e)
 
+        # ── Military tech completions (separate from economic tick system) ──
+        try:
+            from ww1_economy.military_tech_system import MilitaryTechSystem
+            _mil_db = EconomyDB(WW1_DB)
+            _mil_db.init()
+            mil_events = MilitaryTechSystem(_mil_db).process_completions(
+                SERVER_ID, SCENARIO_ID, new_game_day
+            )
+            for evt in mil_events:
+                log.info(
+                    "Military tech completed: %s → %s (unlocks: %s)",
+                    evt.country_id, evt.name, evt.unlocked_units,
+                )
+        except Exception as e:
+            log.warning("Military tech completion error: %s", e)
+
+        # ── Recruiting army graduation ────────────────────────────────────────
+        try:
+            import sqlite3 as _sqlite3
+            _con = _sqlite3.connect(WW1_DB)
+            _con.row_factory = _sqlite3.Row
+            due = _con.execute(
+                "SELECT army_id FROM armies "
+                "WHERE server_id=? AND scenario_id=? "
+                "AND state='recruiting' AND recruitment_end_day <= ?",
+                (SERVER_ID, SCENARIO_ID, new_game_day),
+            ).fetchall()
+            for row in due:
+                _con.execute(
+                    "UPDATE armies SET state='idle' WHERE army_id=?",
+                    (row["army_id"],),
+                )
+                log.info("Army %s finished recruiting — state → idle.", row["army_id"][:8])
+            if due:
+                _con.commit()
+            _con.close()
+        except Exception as e:
+            log.warning("Army graduation error: %s", e)
+
         # ── Monthly tick: consumption → production → market → efficiency ───────
         month_before   = game_day_before  // game_state.DAYS_PER_MONTH
         month_after    = new_game_day     // game_state.DAYS_PER_MONTH

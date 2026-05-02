@@ -169,15 +169,12 @@ class RecruitUnitSelect(discord.ui.Select):
 
         await interaction.response.defer()
 
-        selected_slots = set(self.values)
-        old_slots      = set(view.quantities.keys())
+        selected_slots    = set(self.values)
+        already_confirmed = set(view.quantities.keys())
 
-        # Remove deselected slots
-        for slot in old_slots - selected_slots:
-            view.quantities.pop(slot, None)
-
-        # Ask qty in chat for newly selected slots (in defined order)
-        for slot in [s for s in SLOT_ORDER if s in (selected_slots - old_slots)]:
+        # Ask qty for selected slots that don't already have a confirmed quantity.
+        # Previously confirmed slots are NEVER cleared — each interaction only adds.
+        for slot in [s for s in SLOT_ORDER if s in selected_slots and s not in already_confirmed]:
             unit = self.slot_units[slot]
             prompt_msg = await interaction.channel.send(
                 f"<@{interaction.user.id}> **How many {unit['unit_name']} (`{slot}`) to recruit?**"

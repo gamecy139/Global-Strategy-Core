@@ -224,7 +224,8 @@ class CountrySelect(discord.ui.Select):
             embed = embeds.my_country_resources_embed(country, owner, date, provs)
 
         elif section == "military":
-            army_data = get_army_summary(cid)
+            game_day  = game_state.get_game_day(guild_id)
+            army_data = get_army_summary(cid, game_day)
             embed = embeds.my_country_military_embed(country, owner, date, army_data)
 
         elif section == "infrastructure":

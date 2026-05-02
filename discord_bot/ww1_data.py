@@ -340,41 +340,57 @@ def get_active_research_info(country_id: str, game_day: int) -> dict | None:
     row = db.get_active_research(SERVER_ID, SCENARIO_ID, country_id)
     if row:
         remaining = max(0, row["research_end_day"] - game_day)
-        total     = max(1, row["research_end_day"] - row["research_start_day"])
-        done      = max(0, game_day - row["research_start_day"])
-        pct       = min(100, int(done / total * 100))
-        return {
-            "tech_id":      row["tech_id"],
-            "type":         "tech",
-            "remaining_days": remaining,
-            "pct_done":     pct,
-        }
+        # If end_day has passed and tick hasn't cleared it yet, skip — it's done
+        if remaining == 0 and game_day >= row["research_end_day"]:
+            db.upsert_technology(
+                SERVER_ID, SCENARIO_ID, country_id, row["tech_id"],
+                is_unlocked=True, is_researching=False,
+            )
+        else:
+            total = max(1, row["research_end_day"] - row["research_start_day"])
+            done  = max(0, game_day - row["research_start_day"])
+            pct   = min(100, int(done / total * 100))
+            return {
+                "tech_id":        row["tech_id"],
+                "type":           "tech",
+                "remaining_days": remaining,
+                "pct_done":       pct,
+            }
 
     row = db.get_active_reform_research(SERVER_ID, SCENARIO_ID, country_id)
     if row:
         remaining = max(0, row["research_end_day"] - game_day)
-        total     = max(1, row["research_end_day"] - row["research_start_day"])
-        done      = max(0, game_day - row["research_start_day"])
-        pct       = min(100, int(done / total * 100))
-        return {
-            "tech_id":      row["reform_id"],
-            "type":         "reform",
-            "remaining_days": remaining,
-            "pct_done":     pct,
-        }
+        if remaining == 0 and game_day >= row["research_end_day"]:
+            db.upsert_reform(
+                SERVER_ID, SCENARIO_ID, country_id, row["reform_id"],
+                is_unlocked=True, is_researching=False,
+            )
+        else:
+            total = max(1, row["research_end_day"] - row["research_start_day"])
+            done  = max(0, game_day - row["research_start_day"])
+            pct   = min(100, int(done / total * 100))
+            return {
+                "tech_id":        row["reform_id"],
+                "type":           "reform",
+                "remaining_days": remaining,
+                "pct_done":       pct,
+            }
 
     row = db.get_active_military_research(SERVER_ID, SCENARIO_ID, country_id)
     if row:
         remaining = max(0, row["research_end_day"] - game_day)
-        total     = max(1, row["research_end_day"] - row["research_start_day"])
-        done      = max(0, game_day - row["research_start_day"])
-        pct       = min(100, int(done / total * 100))
-        return {
-            "tech_id":      row["tech_id"],
-            "type":         "military",
-            "remaining_days": remaining,
-            "pct_done":     pct,
-        }
+        if remaining == 0 and game_day >= row["research_end_day"]:
+            db.complete_military_technology(SERVER_ID, SCENARIO_ID, country_id, row["tech_id"])
+        else:
+            total = max(1, row["research_end_day"] - row["research_start_day"])
+            done  = max(0, game_day - row["research_start_day"])
+            pct   = min(100, int(done / total * 100))
+            return {
+                "tech_id":        row["tech_id"],
+                "type":           "military",
+                "remaining_days": remaining,
+                "pct_done":       pct,
+            }
 
     return None
 
@@ -779,10 +795,10 @@ def find_research_target(query: str) -> dict | None:
 
 # ── Army ─────────────────────────────────────────────────────────────────────
 
-def get_army_summary(country_id: str) -> dict:
+def get_army_summary(country_id: str, game_day: int = 0) -> dict:
     with _conn() as con:
         armies = con.execute(
-            "SELECT army_id, province_id, state, strength_pct "
+            "SELECT army_id, province_id, state, strength_pct, recruitment_end_day "
             "FROM armies "
             "WHERE server_id=? AND scenario_id=? AND country_id=?",
             (SERVER_ID, SCENARIO_ID, country_id),
@@ -795,14 +811,23 @@ def get_army_summary(country_id: str) -> dict:
                 (a["army_id"],),
             ).fetchall()
             unit_count = sum(u["quantity"] for u in units)
-            total_units += unit_count
+            state      = a["state"]
+            end_day    = int(a["recruitment_end_day"] or 0)
+            remaining  = max(0, end_day - game_day) if state == "recruiting" else 0
+
+            # Only count fully-ready units toward total
+            if state != "recruiting":
+                total_units += unit_count
+
             army_list.append({
-                "army_id":      a["army_id"][:8],
-                "province_id":  a["province_id"],
-                "state":        a["state"],
-                "strength_pct": a["strength_pct"],
-                "unit_count":   unit_count,
-                "units":        [dict(u) for u in units],
+                "army_id":           a["army_id"][:8],
+                "province_id":       a["province_id"],
+                "state":             state,
+                "strength_pct":      a["strength_pct"],
+                "unit_count":        unit_count,
+                "units":             [dict(u) for u in units],
+                "recruitment_end_day": end_day,
+                "days_remaining":    remaining,
             })
     return {"total_units": total_units, "armies": army_list}
 
@@ -1083,7 +1108,11 @@ def execute_army_recruitment(
         base_province_id = str(province_id),
         last_supply_day  = game_day,
     )
-    db.update_army_fields(army_id, state="recruiting")
+    db.update_army_fields(
+        army_id,
+        state                = "recruiting",
+        recruitment_end_day  = game_day + total_time,
+    )
 
     for slot, sel in unit_slots.items():
         db.upsert_army_unit(

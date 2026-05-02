@@ -367,15 +367,27 @@ def my_country_military_embed(country: dict, owner: str, date: str,
     if not armies:
         body = "*No army units currently deployed.\nRecruit troops to build your military force.*"
     else:
-        lines = [f"**Total Units:** {total:,}\n"]
+        lines = [f"**Total Deployed Units:** {total:,}\n"]
         for a in armies:
-            lines.append(
-                f"**Army `{a['army_id']}`** — Province {a['province_id']} "
-                f"({a['strength_pct']:.0f}% strength) — **{a['unit_count']} units**"
-            )
-            for u in a["units"]:
-                lines.append(f"  ↳ {u['unit_name']}: {u['quantity']:,}")
-        body = "\n".join(lines[:30])
+            state = a["state"]
+            if state == "recruiting":
+                rem  = a["days_remaining"]
+                m, d = divmod(rem, 30)
+                time_str = f"{m}m {d}d" if m else f"{d}d"
+                lines.append(
+                    f"🔨 **Army `{a['army_id']}`** — Province {a['province_id']} "
+                    f"— *recruiting* (**{time_str} remaining**)"
+                )
+                for u in a["units"]:
+                    lines.append(f"  ↳ {u['unit_name']}: {u['quantity']:,}")
+            else:
+                lines.append(
+                    f"⚔️ **Army `{a['army_id']}`** — Province {a['province_id']} "
+                    f"({a['strength_pct']:.0f}% strength) — **{a['unit_count']} units**"
+                )
+                for u in a["units"]:
+                    lines.append(f"  ↳ {u['unit_name']}: {u['quantity']:,}")
+        body = "\n".join(lines[:40])
 
     e = discord.Embed(
         title=f"⚔️  Military — {country['country_name']}",
@@ -677,8 +689,9 @@ def tech_tree_embed(
         row    = tech_status.get(tid, {})
 
         is_unlocked    = bool(row.get("is_unlocked", False))
-        is_researching = bool(row.get("is_researching", False))
-        is_paused      = tid in paused_ids
+        # Guard: if unlocked, never show as researching even if DB flag is stale
+        is_researching = bool(row.get("is_researching", False)) and not is_unlocked
+        is_paused      = tid in paused_ids and not is_unlocked
 
         if is_unlocked:
             icon = "✅"
@@ -693,11 +706,7 @@ def tech_tree_embed(
 
         extra = ""
         if is_researching and row:
-            # Show % done
-            start = row.get("research_start_day", 0)
-            end_  = row.get("research_end_day", 0)
-            total = max(1, end_ - start)
-            extra = f" — *researching*"
+            extra = " — *researching*"
         elif is_paused:
             extra = f" — *paused*"
 
