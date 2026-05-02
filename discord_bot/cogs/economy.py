@@ -17,7 +17,8 @@ from discord_bot.ww1_data import (
     get_mil_tech_status_for_country, get_active_research_info,
     get_research_speed, cancel_active_research,
     start_tech_research, start_reform_research, start_mil_tech_research,
-    adopt_reform, find_research_target,
+    adopt_reform, find_research_target, remove_reform,
+    get_market_snapshot, buy_from_market,
 )
 
 # Items shown per tech-tree page
@@ -472,6 +473,192 @@ class TechTreeView(discord.ui.View):
             item.disabled = True
 
 
+# ── Global Market — resource select ──────────────────────────────────────────
+
+class ResourceSelect(discord.ui.Select):
+    def __init__(self, market_rows: list[dict], country_id: str, guild_id: str):
+        self.country_id  = country_id
+        self.guild_id    = guild_id
+        self.row_map     = {r["resource_name"]: r for r in market_rows}
+
+        from ww1_economy.resources import MARKET_BASE_PRICES, MARKET_RESOURCE_SET
+        ORDERED = [
+            "iron", "coal", "copper", "stone", "wood", "rubber",
+            "grain", "meat", "cotton", "oil",
+            "chemicals", "gunpowder", "ammunition", "medicines",
+        ]
+        options = []
+        for res in ORDERED:
+            row      = self.row_map.get(res)
+            price    = float(row["current_price"]) if row else MARKET_BASE_PRICES.get(res, 0.0)
+            shortage = bool(int(row.get("shortage") or 0)) if row else False
+            emoji    = embeds.RESOURCE_EMOJI.get(res, "📦")
+            label    = res.title()
+            desc     = f"{price:.1f} gold/unit"
+            if shortage:
+                desc += "  [SHORTAGE]"
+            options.append(discord.SelectOption(
+                label       = label,
+                value       = res,
+                description = desc,
+                emoji       = emoji,
+            ))
+
+        super().__init__(
+            placeholder = "☐  Select a resource to buy…",
+            min_values  = 1,
+            max_values  = 1,
+            options     = options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        resource = self.values[0]
+        row      = self.row_map.get(resource, {})
+        shortage = bool(int(row.get("shortage") or 0)) if row else False
+
+        if shortage:
+            await interaction.response.send_message(
+                embed=embeds.market_buy_error_embed(
+                    f"**{resource.title()}** is currently in shortage — market closed for buyers."
+                ),
+                ephemeral=True,
+            )
+            return
+
+        modal = QuantityModal(
+            resource   = resource,
+            market_row = row,
+            country_id = self.country_id,
+            guild_id   = self.guild_id,
+        )
+        await interaction.response.send_modal(modal)
+
+
+class GlobalMarketView(discord.ui.View):
+    def __init__(self, market_rows: list[dict], country_id: str, guild_id: str):
+        super().__init__(timeout=120)
+        self.add_item(ResourceSelect(market_rows, country_id, guild_id))
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+
+# ── Global Market — quantity modal ────────────────────────────────────────────
+
+class QuantityModal(discord.ui.Modal, title="Enter Quantity"):
+    quantity: discord.ui.TextInput = discord.ui.TextInput(
+        label       = "How many units do you want to buy?",
+        placeholder = "e.g. 50",
+        min_length  = 1,
+        max_length  = 7,
+        required    = True,
+    )
+
+    def __init__(self, resource: str, market_row: dict,
+                 country_id: str, guild_id: str):
+        super().__init__()
+        self.resource   = resource
+        self.market_row = market_row
+        self.country_id = country_id
+        self.guild_id   = guild_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw = self.quantity.value.strip().replace(",", "")
+        try:
+            qty = int(raw)
+        except ValueError:
+            await interaction.response.send_message(
+                embed=embeds.market_buy_error_embed("Please enter a valid whole number."),
+                ephemeral=True,
+            )
+            return
+
+        if qty <= 0:
+            await interaction.response.send_message(
+                embed=embeds.market_buy_error_embed("Quantity must be at least 1."),
+                ephemeral=True,
+            )
+            return
+
+        from ww1_economy.resources import MARKET_BASE_PRICES
+        unit_price = float(self.market_row.get("current_price") or MARKET_BASE_PRICES.get(self.resource, 0.0))
+        total_cost = unit_price * qty
+        country    = get_country_by_id(self.country_id)
+        treasury   = country["treasury"] if country else 0.0
+
+        confirm_view = MarketConfirmView(
+            resource   = self.resource,
+            quantity   = qty,
+            unit_price = unit_price,
+            total_cost = total_cost,
+            country_id = self.country_id,
+            guild_id   = self.guild_id,
+        )
+        await interaction.response.send_message(
+            embed=embeds.market_buy_confirm_embed(
+                resource   = self.resource,
+                quantity   = qty,
+                unit_price = unit_price,
+                total_cost = total_cost,
+                treasury   = treasury,
+            ),
+            view=confirm_view,
+        )
+
+
+# ── Global Market — confirm / cancel ─────────────────────────────────────────
+
+class MarketConfirmView(discord.ui.View):
+    def __init__(self, resource: str, quantity: int,
+                 unit_price: float, total_cost: float,
+                 country_id: str, guild_id: str):
+        super().__init__(timeout=90)
+        self.resource   = resource
+        self.quantity   = quantity
+        self.unit_price = unit_price
+        self.total_cost = total_cost
+        self.country_id = country_id
+        self.guild_id   = guild_id
+
+    @discord.ui.button(label="✅  Buy", style=discord.ButtonStyle.success)
+    async def buy_btn(self, interaction: discord.Interaction,
+                      button: discord.ui.Button):
+        await interaction.response.defer()
+
+        result = buy_from_market(self.country_id, self.resource, self.quantity)
+
+        if not result["success"]:
+            await interaction.edit_original_response(
+                embed=embeds.market_buy_error_embed(result["reason"]),
+                view=None,
+            )
+            return
+
+        await interaction.edit_original_response(
+            embed=embeds.market_buy_success_embed(
+                resource     = self.resource,
+                quantity     = result["quantity"],
+                total_cost   = result["total_cost"],
+                new_treasury = result["new_treasury"],
+                new_storage  = result["new_storage"],
+            ),
+            view=None,
+        )
+
+    @discord.ui.button(label="❌  Cancel", style=discord.ButtonStyle.danger)
+    async def cancel_btn(self, interaction: discord.Interaction,
+                         button: discord.ui.Button):
+        await interaction.response.edit_message(
+            embed=embeds.select_error_embed("Purchase cancelled."),
+            view=None,
+        )
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+
 # ── Cog ───────────────────────────────────────────────────────────────────────
 
 class EconomyCog(commands.Cog, name="Economy"):
@@ -916,6 +1103,64 @@ class EconomyCog(commands.Cog, name="Economy"):
             adopted_count = len(adopted_ids),
         ))
 
+    # ── rp remove reforms / rp rr <name> ─────────────────────────────────────
+
+    @commands.command(name="remove_reforms", aliases=["rr"])
+    async def remove_reforms_cmd(self, ctx: commands.Context, *, reform_name: str = ""):
+        guild_id = str(ctx.guild.id)
+        user_id  = str(ctx.author.id)
+
+        if not game_state.is_game_running(guild_id):
+            await ctx.send(embed=embeds.no_game_embed())
+            return
+
+        if not reform_name:
+            await ctx.send(embed=embeds.remove_reform_error_embed(
+                "Please specify a reform to remove.\nExample: **`rp rr banking system`**\n"
+                "Use **`rp reforms`** to see your currently adopted reforms."
+            ))
+            return
+
+        country_id = game_state.get_user_country(guild_id, user_id)
+        if country_id is None:
+            await ctx.send(embed=embeds.no_country_embed())
+            return
+
+        # Fuzzy-find the reform
+        from ww1_economy.tech_data import REFORM_TREE
+        q = reform_name.strip().lower().replace("-", " ").replace("_", " ")
+        matched_rid = None
+        for rid, rdef in REFORM_TREE.items():
+            norm = rdef.name.lower().replace("-", " ")
+            if norm == q or rid.replace("_", " ") == q:
+                matched_rid = rid
+                break
+        if matched_rid is None:
+            for rid, rdef in REFORM_TREE.items():
+                norm = rdef.name.lower().replace("-", " ")
+                if q in norm or q in rid.replace("_", " "):
+                    matched_rid = rid
+                    break
+
+        if matched_rid is None:
+            await ctx.send(embed=embeds.remove_reform_error_embed(
+                f"No reform found matching **\"{reform_name}\"**.\n"
+                "Use **`rp reforms`** to see all reforms."
+            ))
+            return
+
+        rdef   = REFORM_TREE[matched_rid]
+        result = remove_reform(country_id, matched_rid)
+
+        if not result["ok"]:
+            await ctx.send(embed=embeds.remove_reform_error_embed(result["reason"]))
+            return
+
+        await ctx.send(embed=embeds.remove_reform_success_embed(
+            reform_name   = rdef.name,
+            adopted_count = result["adopted_count"],
+        ))
+
     # ── rp adopt <reform> ────────────────────────────────────────────────────
 
     @commands.command(name="adopt")
@@ -975,6 +1220,30 @@ class EconomyCog(commands.Cog, name="Economy"):
             new_treasury  = result["new_treasury"],
             adopted_count = result["adopted_count"],
         ))
+
+
+    # ── rp gm / rp global_market ──────────────────────────────────────────────
+
+    @commands.command(name="global_market", aliases=["gm"])
+    async def global_market_cmd(self, ctx: commands.Context):
+        guild_id = str(ctx.guild.id)
+        user_id  = str(ctx.author.id)
+
+        if not game_state.is_game_running(guild_id):
+            await ctx.send(embed=embeds.no_game_embed())
+            return
+
+        country_id = game_state.get_user_country(guild_id, user_id)
+        if country_id is None:
+            await ctx.send(embed=embeds.no_country_embed())
+            return
+
+        market_rows = get_market_snapshot()
+        view        = GlobalMarketView(market_rows, country_id, guild_id)
+        await ctx.send(
+            embed=embeds.global_market_embed(market_rows),
+            view=view,
+        )
 
 
 async def setup(bot: commands.Bot):

@@ -612,6 +612,68 @@ def apply_hospital_opinion(country_id: str, province_count: int = 1) -> None:
     _apply_opinion_delta(country_id, delta)
 
 
+def remove_reform(country_id: str, reform_id: str) -> dict:
+    """
+    Unadopt an adopted reform.
+    Reverses the opinion_bonus that was applied on adoption.
+    Returns {"ok": True} or {"ok": False, "reason": str}.
+    """
+    from ww1_economy.tech_data import REFORM_TREE
+
+    rdef = REFORM_TREE.get(reform_id)
+    if rdef is None:
+        return {"ok": False, "reason": "Unknown reform."}
+
+    db      = _get_econ_db()
+    rstatus = get_reform_status_for_country(country_id)
+    row     = rstatus.get(reform_id, {})
+
+    if not row.get("is_adopted", False):
+        return {"ok": False, "reason": "This reform is not currently adopted."}
+
+    db.unadopt_reform(SERVER_ID, SCENARIO_ID, country_id, reform_id)
+
+    # Reverse the opinion bonus
+    if rdef.opinion_bonus:
+        _apply_opinion_delta(country_id, -rdef.opinion_bonus)
+
+    adopted = db.get_adopted_reforms(SERVER_ID, SCENARIO_ID, country_id)
+    return {"ok": True, "adopted_count": len(adopted)}
+
+
+def get_market_snapshot() -> list[dict]:
+    """
+    Return current market state for all resources (initialising rows if needed).
+    Each row has: resource_name, base_price, current_price, shortage, shortage_end_month.
+    """
+    from ww1_economy.db import EconomyDB
+    db = EconomyDB(DB_PATH)
+    db.init()
+    db.init_market_prices(SERVER_ID, SCENARIO_ID)
+    return db.get_all_market(SERVER_ID, SCENARIO_ID)
+
+
+def buy_from_market(country_id: str, resource: str, quantity: int) -> dict:
+    """
+    Purchase *quantity* units of *resource* from the global market.
+    Deducts gold from treasury and adds resources to storage.
+    Returns BuyResult.to_dict().
+    """
+    from ww1_economy.db              import EconomyDB
+    from ww1_economy.market_system   import GlobalMarketSystem
+    from ww1_economy.storage_system  import StorageSystem
+    from ww1_economy.treasury_system import TreasurySystem
+
+    db       = EconomyDB(DB_PATH)
+    db.init()
+    storage  = StorageSystem(db)
+    treasury = TreasurySystem(db)
+    market   = GlobalMarketSystem(db, storage, treasury)
+
+    result = market.buy_resource(SERVER_ID, SCENARIO_ID, country_id, resource, quantity)
+    return result.to_dict()
+
+
 # ── Fuzzy research name lookup ────────────────────────────────────────────────
 
 def find_research_target(query: str) -> dict | None:

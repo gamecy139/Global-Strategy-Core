@@ -77,6 +77,8 @@ def help_embed() -> discord.Embed:
         ("rp switch_research `<name>`",   "Pause current research and start a new one."),
         ("rp reforms",                    "View all reforms and their effects."),
         ("rp adopt `<reform>`",           "Adopt a researched reform (costs 100 gold)."),
+        ("rp rr `<reform>`",              "Remove / unadopt an active reform."),
+        ("rp gm",                         "Open the Global Market to buy resources."),
     ]
     for name, desc in cmds:
         e.add_field(name=f"`{name}`", value=desc, inline=False)
@@ -853,3 +855,115 @@ def adopt_success_embed(reform_name: str, gold_spent: float,
 
 def adopt_error_embed(reason: str) -> discord.Embed:
     return _base("❌  Adoption Failed", reason, COL_RED)
+
+
+# ── rp remove reforms ────────────────────────────────────────────────────────
+
+def remove_reform_success_embed(reform_name: str, adopted_count: int) -> discord.Embed:
+    from ww1_economy.tech_data import MAX_ADOPTED_REFORMS
+    return _base(
+        "🗑️  Reform Removed",
+        (
+            f"**{reform_name}** has been unadopted.\n\n"
+            f"The reform's opinion bonus has been reversed.\n"
+            f"📜 **Adopted reforms:** {adopted_count}/{MAX_ADOPTED_REFORMS}\n\n"
+            "You can re-adopt it later with **`rp adopt <reform>`**."
+        ),
+        COL_ORANGE,
+    )
+
+
+def remove_reform_error_embed(reason: str) -> discord.Embed:
+    return _base("❌  Remove Reform Failed", reason, COL_RED)
+
+
+# ── rp gm — Global Market ────────────────────────────────────────────────────
+
+def global_market_embed(market_rows: list[dict]) -> discord.Embed:
+    e = discord.Embed(
+        title="🌐  Global Market",
+        description=(
+            "Buy resources from the international market.\n"
+            "Prices shift with demand — high demand raises prices, low demand lowers them.\n"
+            "⚠️ Resources in **shortage** cannot be purchased.\n\n"
+            "Select a resource below to begin a purchase."
+        ),
+        colour=COL_TEAL,
+    )
+    e.set_thumbnail(url=THUMB)
+
+    row_map = {r["resource_name"]: r for r in market_rows}
+
+    TIER1 = ["iron", "coal", "copper", "stone", "wood", "rubber",
+             "grain", "meat", "cotton", "oil"]
+    TIER2 = ["chemicals", "gunpowder", "ammunition", "medicines"]
+
+    def _res_line(res: str) -> str:
+        row = row_map.get(res)
+        if row is None:
+            from ww1_economy.resources import MARKET_BASE_PRICES
+            price = MARKET_BASE_PRICES.get(res, 0.0)
+            shortage = False
+        else:
+            price    = float(row["current_price"])
+            shortage = bool(int(row.get("shortage") or 0))
+        emoji  = RESOURCE_EMOJI.get(res, "📦")
+        status = "  🚫 *Shortage*" if shortage else ""
+        return f"{emoji} **{res.title()}** — {price:.1f} gold/unit{status}"
+
+    t1_lines = "\n".join(_res_line(r) for r in TIER1)
+    t2_lines = "\n".join(_res_line(r) for r in TIER2)
+
+    e.add_field(name="⛏️  Tier 1 — Raw Resources", value=t1_lines, inline=False)
+    e.add_field(name="🏭  Tier 2 — Finished Goods",  value=t2_lines, inline=False)
+    e.set_footer(text="Prices update monthly based on demand  •  WW1 Roleplay")
+    return e
+
+
+def market_buy_confirm_embed(
+    resource: str,
+    quantity: int,
+    unit_price: float,
+    total_cost: float,
+    treasury: float,
+) -> discord.Embed:
+    emoji   = RESOURCE_EMOJI.get(resource, "📦")
+    afford  = treasury >= total_cost
+    status  = f"✅ You can afford this." if afford else f"❌ **Insufficient gold** (need {total_cost:,.1f}, have {treasury:,.1f})."
+    return _base(
+        "🛒  Confirm Purchase",
+        (
+            f"{emoji} **Resource:** {resource.title()}\n"
+            f"📦 **Quantity:** {quantity:,} units\n"
+            f"💲 **Unit Price:** {unit_price:.1f} gold\n"
+            f"💰 **Total Cost:** {total_cost:,.1f} gold\n"
+            f"🏦 **Your Treasury:** {treasury:,.1f} gold\n\n"
+            f"{status}\n\n"
+            "Click **Buy** to confirm or **Cancel** to abort."
+        ),
+        COL_GREEN if afford else COL_RED,
+    )
+
+
+def market_buy_success_embed(
+    resource: str,
+    quantity: int,
+    total_cost: float,
+    new_treasury: float,
+    new_storage: int,
+) -> discord.Embed:
+    emoji = RESOURCE_EMOJI.get(resource, "📦")
+    return _base(
+        "✅  Purchase Complete!",
+        (
+            f"{emoji} **{quantity:,}× {resource.title()}** purchased.\n\n"
+            f"💲 **Gold Spent:** {total_cost:,.1f}\n"
+            f"💰 **Treasury Remaining:** {new_treasury:,.1f} gold\n"
+            f"📦 **{resource.title()} in Storage:** {new_storage:,} units"
+        ),
+        COL_GREEN,
+    )
+
+
+def market_buy_error_embed(reason: str) -> discord.Embed:
+    return _base("❌  Purchase Failed", reason, COL_RED)
