@@ -162,6 +162,31 @@ async def tick_task() -> None:
             for cid in country_ids:
                 _apply_monthly_growth(cid, months_crossed)
 
+            # Diplomacy monthly drifts (+5 improve / -5 damage per action)
+            try:
+                from discord_bot.ww1_data import get_active_diplomacy_actions, is_rival
+                from ww1_economy.db import EconomyDB as _EconDB
+                _dip_db = _EconDB(WW1_DB)
+                _dip_db.init()
+                actions = get_active_diplomacy_actions(SERVER_ID, SCENARIO_ID)
+                for act in actions:
+                    actor  = act["actor"]
+                    target = act["target"]
+                    atype  = act["action_type"]
+                    if atype == "improve":
+                        if not is_rival(actor, target):
+                            _dip_db.adjust_base_relation(
+                                SERVER_ID, SCENARIO_ID, actor, target, +5.0
+                            )
+                    elif atype == "damage":
+                        _dip_db.adjust_base_relation(
+                            SERVER_ID, SCENARIO_ID, actor, target, -5.0
+                        )
+                if actions:
+                    log.info("Applied monthly diplomacy drifts for %d actions.", len(actions))
+            except Exception as e:
+                log.warning("Diplomacy drift error: %s", e)
+
 
 @tick_task.before_loop
 async def _before_tick(bot=None) -> None:

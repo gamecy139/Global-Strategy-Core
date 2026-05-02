@@ -81,6 +81,8 @@ def help_embed() -> discord.Embed:
         ("rp taxation",                   "Set your tax policy (affects income & opinion)."),
         ("rp gm",                         "Open the Global Market to buy resources."),
         ("rp recruit_army / rp ra",       "Recruit an army in one of your provinces."),
+        ("rp edit_diplomacy / rp ed",     "Manage diplomatic actions (improve, damage, war, alliance, gift, rivalry)."),
+        ("rp check_diplomacy / rp cd",    "View your diplomacy overview and inspect per-country relations."),
     ]
     for name, desc in cmds:
         e.add_field(name=f"`{name}`", value=desc, inline=False)
@@ -1204,3 +1206,146 @@ def recruit_no_units_embed(country_name: str) -> discord.Embed:
         ),
         COL_GREY,
     )
+
+
+# ── Diplomacy embeds ──────────────────────────────────────────────────────────
+
+_DIPLO_ACTIONS = {
+    "improve":   ("📈", "Improve Relations",  "+5 relations per month with the selected country"),
+    "damage":    ("📉", "Damage Relations",   "−5 relations per month with the selected country"),
+    "rivalry":   ("🗡️",  "Declare Rivalry",    "−10 relations instantly; blocks improvement on both sides"),
+    "alliance":  ("🤝", "Propose Alliance",   "Form an alliance (requires 80+ relations)"),
+    "war":       ("⚔️",  "Declare War",        "Declare war on a country (requires < 20 relations)"),
+    "gift":      ("🎁", "Send Gift",          "−40 gold → target treasury, +5 relations instantly"),
+}
+
+
+def diplo_main_embed(country_name: str) -> discord.Embed:
+    e = _base(
+        f"⚖️  Diplomacy — {country_name}",
+        "Select a diplomatic action from the dropdown below.",
+        COL_BLUE,
+    )
+    for key, (emoji, label, desc) in _DIPLO_ACTIONS.items():
+        e.add_field(name=f"{emoji} {label}", value=desc, inline=False)
+    return e
+
+
+def diplo_country_select_embed(action_key: str, country_name: str) -> discord.Embed:
+    emoji, label, desc = _DIPLO_ACTIONS[action_key]
+    return _base(
+        f"{emoji} {label} — Select Country",
+        f"**{country_name}** is performing: _{desc}_\n\nChoose a target country below.",
+        COL_BLUE,
+    )
+
+
+def diplo_result_embed(ok: bool, title: str, body: str) -> discord.Embed:
+    colour = COL_GREEN if ok else COL_RED
+    icon   = "✅" if ok else "❌"
+    return _base(f"{icon}  {title}", body, colour)
+
+
+def check_diplomacy_embed(
+    country_name: str,
+    country_id:   str,
+    friendly:     dict[str, float],
+    unfriendly:   dict[str, float],
+    our_rivals:   list[str],
+    rivaled_by:   list[str],
+    allies:       list[str],
+    wars:         list[dict],
+    name_map:     dict[str, str],
+) -> discord.Embed:
+    e = _base(
+        f"🌍  Diplomacy Overview — {country_name}",
+        "A summary of your current diplomatic standing.",
+        COL_TEAL,
+    )
+
+    def _names(ids: list[str] | dict) -> str:
+        if isinstance(ids, dict):
+            parts = [f"**{name_map.get(cid, cid)}** `{v:.0f}`" for cid, v in ids.items()]
+        else:
+            parts = [f"**{name_map.get(cid, cid)}**" for cid in ids]
+        return ", ".join(parts) if parts else "_None_"
+
+    e.add_field(name="🟢 Friendly (>60)", value=_names(friendly),   inline=False)
+    e.add_field(name="🔴 Unfriendly (<30)", value=_names(unfriendly), inline=False)
+    e.add_field(name="🗡️ Rivals You Declared", value=_names(our_rivals),  inline=True)
+    e.add_field(name="🗡️ Rivaled By",          value=_names(rivaled_by),  inline=True)
+    e.add_field(name="🤝 Alliances", value=_names(allies), inline=False)
+
+    if wars:
+        war_lines = []
+        for w in wars:
+            atk = name_map.get(w["attacker"], w["attacker"])
+            dfn = name_map.get(w["defender"], w["defender"])
+            war_lines.append(f"⚔️ **{atk}** vs **{dfn}**")
+        e.add_field(name="⚔️ Ongoing Wars", value="\n".join(war_lines), inline=False)
+    else:
+        e.add_field(name="⚔️ Ongoing Wars", value="_None_", inline=False)
+
+    e.set_footer(text="WW1 Roleplay  •  Select a country below to view full details")
+    return e
+
+
+def diplo_country_detail_embed(
+    my_country_name:     str,
+    target_country_name: str,
+    relation:            float,
+    is_rival_us:         bool,
+    is_rival_them:       bool,
+    is_allied:           bool,
+    at_war:              bool,
+    improve_active:      bool,
+    damage_active:       bool,
+) -> discord.Embed:
+    if at_war:
+        colour = COL_RED
+    elif relation >= 70:
+        colour = COL_GREEN
+    elif relation < 30:
+        colour = COL_ORANGE
+    else:
+        colour = COL_GOLD
+
+    # Relation bar (10 blocks)
+    filled = round(relation / 10)
+    bar    = "█" * filled + "░" * (10 - filled)
+
+    lines = [
+        f"Relations: **{relation:.0f} / 100**",
+        f"`[{bar}]`",
+        "",
+    ]
+    statuses = []
+    if at_war:
+        statuses.append("⚔️ **AT WAR**")
+    if is_allied:
+        statuses.append("🤝 **Allied**")
+    if is_rival_us:
+        statuses.append("🗡️ You declared rivalry")
+    if is_rival_them:
+        statuses.append("🗡️ They declared rivalry against you")
+    if improve_active:
+        statuses.append("📈 Improving relations (+5/month)")
+    if damage_active:
+        statuses.append("📉 Damaging relations (−5/month)")
+    if not statuses:
+        statuses.append("😐 No special status")
+
+    lines += statuses
+
+    return _base(
+        f"🔍 {my_country_name} ↔ {target_country_name}",
+        "\n".join(lines),
+        colour,
+    )
+
+
+def diplo_help_entries() -> list[tuple[str, str]]:
+    return [
+        ("rp edit_diplomacy / rp ed", "Manage diplomatic actions (improve, damage, war, alliance, gift, rivalry)."),
+        ("rp check_diplomacy / rp cd", "View your diplomatic overview and inspect relations with specific countries."),
+    ]

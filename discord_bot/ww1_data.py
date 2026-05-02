@@ -1134,6 +1134,269 @@ def execute_army_recruitment(
     }
 
 
+# ── Diplomacy ─────────────────────────────────────────────────────────────────
+
+def get_all_relations_for_country(country_id: str) -> dict[str, float]:
+    """Returns {other_country_id: base_relation} for every country that has a row."""
+    db = _get_econ_db()
+    rows = db.get_all_relations(SERVER_ID, SCENARIO_ID)
+    result: dict[str, float] = {}
+    for r in rows:
+        if r["country_a"] == country_id:
+            result[r["country_b"]] = float(r["base_relation"])
+        elif r["country_b"] == country_id:
+            result[r["country_a"]] = float(r["base_relation"])
+    return result
+
+
+def get_relation_value(country_a: str, country_b: str) -> float:
+    """Return base_relation between two countries (default 50 if no row)."""
+    db = _get_econ_db()
+    row = db.get_relation(SERVER_ID, SCENARIO_ID, country_a, country_b)
+    return float(row["base_relation"]) if row else 50.0
+
+
+def is_rival(country_a: str, country_b: str) -> bool:
+    """True if either country has declared rivalry against the other."""
+    with _conn() as con:
+        row = con.execute(
+            "SELECT 1 FROM rivals "
+            "WHERE server_id=? AND scenario_id=? "
+            "AND ((initiator=? AND target=?) OR (initiator=? AND target=?))",
+            (SERVER_ID, SCENARIO_ID, country_a, country_b, country_b, country_a),
+        ).fetchone()
+    return row is not None
+
+
+def is_at_war(country_a: str, country_b: str) -> bool:
+    """True if the two countries are in an active war."""
+    with _conn() as con:
+        row = con.execute("""
+            SELECT 1 FROM wars
+            WHERE server_id=? AND scenario_id=? AND status='active'
+            AND ((attacker=? AND defender=?) OR (attacker=? AND defender=?))
+        """, (SERVER_ID, SCENARIO_ID, country_a, country_b, country_b, country_a)
+        ).fetchone()
+    return row is not None
+
+
+def are_allied(country_a: str, country_b: str) -> bool:
+    """True if the two countries share an alliance."""
+    with _conn() as con:
+        row = con.execute("""
+            SELECT 1 FROM alliance_members m1
+            JOIN alliance_members m2 ON m1.alliance_id = m2.alliance_id
+            WHERE m1.country_id=? AND m2.country_id=?
+            AND m1.server_id=? AND m1.scenario_id=?
+        """, (country_a, country_b, SERVER_ID, SCENARIO_ID)).fetchone()
+    return row is not None
+
+
+def _upsert_diplomacy_action(actor: str, target: str, action_type: str) -> None:
+    con = _write_conn()
+    con.execute("""
+        INSERT INTO diplomacy_actions (server_id, scenario_id, actor, target, action_type)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(server_id, scenario_id, actor, target)
+        DO UPDATE SET action_type=excluded.action_type
+    """, (SERVER_ID, SCENARIO_ID, actor, target, action_type))
+    con.commit()
+    con.close()
+
+
+def _remove_diplomacy_action(actor: str, target: str) -> None:
+    con = _write_conn()
+    con.execute(
+        "DELETE FROM diplomacy_actions "
+        "WHERE server_id=? AND scenario_id=? AND actor=? AND target=?",
+        (SERVER_ID, SCENARIO_ID, actor, target),
+    )
+    con.commit()
+    con.close()
+
+
+def get_active_diplomacy_actions(server_id: str, scenario_id: str) -> list[dict]:
+    """All active improve/damage actions for tick processing."""
+    with _conn() as con:
+        rows = con.execute(
+            "SELECT actor, target, action_type FROM diplomacy_actions "
+            "WHERE server_id=? AND scenario_id=?",
+            (server_id, scenario_id),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def diplo_improve_relations(actor: str, target: str) -> dict:
+    """Queue +5/month improve-relations action. Blocked by rivalry/war."""
+    if is_rival(actor, target):
+        return {"ok": False, "reason": "⚔️ A rivalry exists — improvement is blocked on both sides."}
+    if is_at_war(actor, target):
+        return {"ok": False, "reason": "⚔️ You are at war — improvement is blocked."}
+    _upsert_diplomacy_action(actor, target, "improve")
+    return {"ok": True}
+
+
+def diplo_damage_relations(actor: str, target: str) -> dict:
+    """Queue -5/month damage-relations action."""
+    if is_at_war(actor, target):
+        return {"ok": False, "reason": "⚔️ You are already at war."}
+    _upsert_diplomacy_action(actor, target, "damage")
+    return {"ok": True}
+
+
+def diplo_rivalry(actor: str, target: str) -> dict:
+    """Declare rivalry: -10 relation instantly, blocks improvement both ways."""
+    if is_rival(actor, target):
+        return {"ok": False, "reason": "A rivalry already exists between these countries."}
+    if is_at_war(actor, target):
+        return {"ok": False, "reason": "⚔️ You are already at war — rivalry is redundant."}
+    db = _get_econ_db()
+    new_rel = db.adjust_base_relation(SERVER_ID, SCENARIO_ID, actor, target, -10.0)
+    # Cancel any improve actions in either direction
+    _remove_diplomacy_action(actor, target)
+    _remove_diplomacy_action(target, actor)
+    # Record rivalry (directional — so check_diplomacy can show who initiated)
+    con = _write_conn()
+    con.execute(
+        "INSERT OR IGNORE INTO rivals (server_id, scenario_id, initiator, target) VALUES (?,?,?,?)",
+        (SERVER_ID, SCENARIO_ID, actor, target),
+    )
+    con.commit()
+    con.close()
+    return {"ok": True, "new_relation": new_rel}
+
+
+def diplo_alliance(actor: str, target: str) -> dict:
+    """Propose alliance (immediate if relation >= 80)."""
+    if is_rival(actor, target):
+        return {"ok": False, "reason": "⚔️ Cannot ally with a rival."}
+    if is_at_war(actor, target):
+        return {"ok": False, "reason": "⚔️ Cannot ally with a country you're at war with."}
+    if are_allied(actor, target):
+        return {"ok": False, "reason": "These countries are already allied."}
+    rel = get_relation_value(actor, target)
+    if rel < 80:
+        return {
+            "ok": False,
+            "reason": f"Relations must be at least **80** to propose an alliance.\nCurrent: **{rel:.0f}**",
+        }
+    import uuid as _uuid
+    alliance_id = str(_uuid.uuid4())
+    db = _get_econ_db()
+    db.insert_alliance(alliance_id, SERVER_ID, SCENARIO_ID, f"{actor}-{target} Alliance")
+    db.add_alliance_member(alliance_id, actor, SERVER_ID, SCENARIO_ID)
+    db.add_alliance_member(alliance_id, target, SERVER_ID, SCENARIO_ID)
+    return {"ok": True, "alliance_id": alliance_id}
+
+
+def diplo_declare_war(actor: str, target: str, game_day: int) -> dict:
+    """Declare war. Requires relation < 20."""
+    if actor == target:
+        return {"ok": False, "reason": "You cannot declare war on yourself."}
+    if is_at_war(actor, target):
+        return {"ok": False, "reason": "You are already at war with this country."}
+    rel = get_relation_value(actor, target)
+    if rel >= 20:
+        return {
+            "ok": False,
+            "reason": f"Relations must be below **20** to declare war.\nCurrent: **{rel:.0f}**",
+        }
+    import uuid as _uuid
+    war_id = str(_uuid.uuid4())
+    db = _get_econ_db()
+    db.insert_war(war_id, SERVER_ID, SCENARIO_ID, actor, target, game_day)
+    db.insert_war_participant(war_id, actor, "attacker", is_leader=True)
+    db.insert_war_participant(war_id, target, "defender", is_leader=True)
+    db.upsert_relation(SERVER_ID, SCENARIO_ID, actor, target, 0.0)
+    # Cancel any diplomacy actions between them
+    _remove_diplomacy_action(actor, target)
+    _remove_diplomacy_action(target, actor)
+    return {"ok": True, "war_id": war_id}
+
+
+def diplo_send_gift(actor: str, target: str) -> dict:
+    """Send 40 gold gift: deducted from actor, +40 to target treasury, +5 relation."""
+    GIFT_GOLD = 40.0
+    GIFT_REL  = 5.0
+    if is_at_war(actor, target):
+        return {"ok": False, "reason": "⚔️ Cannot send gifts to a country you're at war with."}
+    try:
+        deduct_treasury(actor, GIFT_GOLD)
+    except ValueError as e:
+        return {"ok": False, "reason": str(e)}
+    credit_treasury(target, GIFT_GOLD)
+    db = _get_econ_db()
+    new_rel = db.adjust_base_relation(SERVER_ID, SCENARIO_ID, actor, target, GIFT_REL)
+    return {"ok": True, "new_relation": new_rel}
+
+
+def get_rivals_of(country_id: str) -> tuple[list[str], list[str]]:
+    """Returns (countries_we_rivaled, countries_who_rivaled_us)."""
+    with _conn() as con:
+        our   = [r[0] for r in con.execute(
+            "SELECT target FROM rivals WHERE server_id=? AND scenario_id=? AND initiator=?",
+            (SERVER_ID, SCENARIO_ID, country_id),
+        ).fetchall()]
+        their = [r[0] for r in con.execute(
+            "SELECT initiator FROM rivals WHERE server_id=? AND scenario_id=? AND target=?",
+            (SERVER_ID, SCENARIO_ID, country_id),
+        ).fetchall()]
+    return our, their
+
+
+def get_ally_country_ids(country_id: str) -> list[str]:
+    """Returns list of country_ids allied with country_id."""
+    with _conn() as con:
+        # Find alliance_ids this country belongs to
+        alliances = [r[0] for r in con.execute(
+            "SELECT alliance_id FROM alliance_members "
+            "WHERE server_id=? AND scenario_id=? AND country_id=?",
+            (SERVER_ID, SCENARIO_ID, country_id),
+        ).fetchall()]
+        if not alliances:
+            return []
+        placeholders = ",".join("?" * len(alliances))
+        allies = [r[0] for r in con.execute(
+            f"SELECT country_id FROM alliance_members "
+            f"WHERE alliance_id IN ({placeholders}) AND country_id != ?",
+            (*alliances, country_id),
+        ).fetchall()]
+    return list(dict.fromkeys(allies))  # deduplicate, preserve order
+
+
+def get_active_wars_for_country(country_id: str) -> list[dict]:
+    """All active wars involving country_id."""
+    with _conn() as con:
+        rows = con.execute("""
+            SELECT w.war_id, w.attacker, w.defender, w.start_day
+            FROM wars w
+            LEFT JOIN war_participants wp ON w.war_id = wp.war_id
+            WHERE w.server_id=? AND w.scenario_id=? AND w.status='active'
+            AND (w.attacker=? OR w.defender=? OR wp.country_id=?)
+        """, (SERVER_ID, SCENARIO_ID, country_id, country_id, country_id)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_diplomacy_overview(country_id: str) -> dict:
+    """Full diplomatic picture for rp check_diplomacy."""
+    all_rels  = get_all_relations_for_country(country_id)
+    friendly  = {cid: v for cid, v in all_rels.items() if v > 60}
+    unfriendly = {cid: v for cid, v in all_rels.items() if v < 30}
+    our_rivals, rivaled_by = get_rivals_of(country_id)
+    allies = get_ally_country_ids(country_id)
+    wars   = get_active_wars_for_country(country_id)
+    return {
+        "friendly":    friendly,
+        "unfriendly":  unfriendly,
+        "our_rivals":  our_rivals,
+        "rivaled_by":  rivaled_by,
+        "allies":      allies,
+        "wars":        wars,
+        "all_rels":    all_rels,
+    }
+
+
 # ── Formatting ────────────────────────────────────────────────────────────────
 
 def fmt_pop(n: int | float) -> str:

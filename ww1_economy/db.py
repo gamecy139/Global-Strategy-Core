@@ -152,6 +152,9 @@ class EconomyDB:
             self._create_province_religion_conversion(conn)
             self._create_war_reparations(conn)
             self._create_puppet_states(conn)
+            # Diplomacy extras
+            self._create_rivals(conn)
+            self._create_diplomacy_actions(conn)
             # Migrations
             self._migrate_buildings(conn)
             self._migrate_countries(conn)
@@ -1746,6 +1749,31 @@ class EconomyDB:
                 server_id   TEXT NOT NULL,
                 scenario_id TEXT NOT NULL,
                 PRIMARY KEY (alliance_id, country_id)
+            )
+        """)
+
+    @staticmethod
+    def _create_rivals(conn: sqlite3.Connection) -> None:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS rivals (
+                server_id    TEXT NOT NULL,
+                scenario_id  TEXT NOT NULL,
+                initiator    TEXT NOT NULL,
+                target       TEXT NOT NULL,
+                PRIMARY KEY (server_id, scenario_id, initiator, target)
+            )
+        """)
+
+    @staticmethod
+    def _create_diplomacy_actions(conn: sqlite3.Connection) -> None:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS diplomacy_actions (
+                server_id    TEXT NOT NULL,
+                scenario_id  TEXT NOT NULL,
+                actor        TEXT NOT NULL,
+                target       TEXT NOT NULL,
+                action_type  TEXT NOT NULL,
+                PRIMARY KEY (server_id, scenario_id, actor, target)
             )
         """)
 

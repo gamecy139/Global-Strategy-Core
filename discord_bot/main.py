@@ -102,6 +102,7 @@ class RoleplayBot(commands.Bot):
         await self.load_extension("discord_bot.cogs.game")
         await self.load_extension("discord_bot.cogs.economy")
         await self.load_extension("discord_bot.cogs.recruit")
+        await self.load_extension("discord_bot.cogs.diplomacy")
         log.info("Cogs loaded.")
 
     async def on_ready(self):
