@@ -1554,8 +1554,330 @@ def call_allies_embed(
 
 def war_help_entries() -> list[tuple[str, str]]:
     return [
-        ("rp declare_war <country>", "Declare war on another country."),
-        ("rp war",                   "View your active wars with ceasefire/surrender/victory controls."),
-        ("rp call_allies / rp ca",   "Call an allied country into one of your wars."),
-        ("rp move_unit",             "Order an army to march to a new province."),
+        ("rp declare_war <country>",       "Declare war on another country."),
+        ("rp war",                         "View your active wars with ceasefire/surrender/victory controls."),
+        ("rp call_allies / rp ca",         "Call an allied country into one of your wars."),
+        ("rp move_unit",                   "Order an army to march to a new province."),
+        ("rp non_core_province / rp nc",   "Start core conversion for non-core provinces."),
+        ("rp diff_religion / rp dr",       "Start religion conversion for mismatched provinces."),
     ]
+
+
+# ── Victory Decision embeds ────────────────────────────────────────────────────
+
+PROVINCE_COST    = 15
+PUPPET_COST      = 90
+INSULT_COST      = 25
+REPARATIONS_COST = 35
+
+_OPT_LABELS = {
+    "occupy":      "⚔️  Occupy Provinces",
+    "puppet":      "🤝  Puppet State",
+    "insult":      "😤  Insult",
+    "reparations": "💰  War Reparations",
+}
+_OPT_COSTS = {
+    "occupy":      f"{PROVINCE_COST} score / province",
+    "puppet":      f"{PUPPET_COST} score",
+    "insult":      f"{INSULT_COST} score",
+    "reparations": f"{REPARATIONS_COST} score",
+}
+
+
+def victory_decision_embed(
+    winner_name: str,
+    loser_name:  str,
+    score:       float,
+    selected_opts: set[str],
+    selected_provinces: list[str],
+    province_names: dict[str, str] | None = None,
+) -> discord.Embed:
+    province_names = province_names or {}
+    prov_cost = PROVINCE_COST * len(selected_provinces)
+    other_cost = sum(
+        {"puppet": PUPPET_COST, "insult": INSULT_COST, "reparations": REPARATIONS_COST}.get(o, 0)
+        for o in selected_opts if o != "occupy"
+    )
+    total_cost = prov_cost + other_cost
+    score_after = score - total_cost
+
+    e = discord.Embed(
+        title="👑  Victory Decisions",
+        colour=COL_GOLD,
+    )
+    e.set_thumbnail(url=THUMB)
+    e.set_footer(text="WW1 Roleplay  •  prefix: rp")
+
+    e.add_field(
+        name="⚔️  War Summary",
+        value=(
+            f"**Winner:** {winner_name}\n"
+            f"**Loser:**  {loser_name}\n"
+            f"**War Score Available:** {score:.1f}"
+        ),
+        inline=False,
+    )
+
+    # Options overview
+    opt_lines = []
+    for key, label in _OPT_LABELS.items():
+        chk  = "☑️" if key in selected_opts else "☐"
+        cost = _OPT_COSTS[key]
+        opt_lines.append(f"{chk} **{label}** — {cost}")
+    e.add_field(name="📋  Available Demands", value="\n".join(opt_lines), inline=False)
+
+    # Selected summary
+    if selected_opts:
+        lines = []
+        if "occupy" in selected_opts:
+            if selected_provinces:
+                pnames = [province_names.get(p, p) for p in selected_provinces]
+                lines.append(f"⚔️  Provinces: {', '.join(pnames)} (−{prov_cost} score)")
+            else:
+                lines.append("⚔️  Provinces: *none selected yet*")
+        for key in ("puppet", "insult", "reparations"):
+            if key in selected_opts:
+                c = {"puppet": PUPPET_COST, "insult": INSULT_COST, "reparations": REPARATIONS_COST}[key]
+                lines.append(f"{_OPT_LABELS[key]}: −{c} score")
+        lines.append(f"\n**Total cost:** {total_cost:.0f}  |  **Score remaining:** {score_after:.1f}")
+        colour = COL_GREEN if score_after >= 0 else COL_RED
+        e.add_field(name="✅  Your Selections", value="\n".join(lines), inline=False)
+        e.colour = colour
+    else:
+        e.add_field(
+            name="ℹ️  Instructions",
+            value="Use the dropdown to select your demands, then press **Continue**.",
+            inline=False,
+        )
+    return e
+
+
+def province_select_embed(
+    defender_name: str,
+    provinces:     list[dict],
+    score:         float,
+    already_selected: list[str] | None = None,
+) -> discord.Embed:
+    already_selected = already_selected or []
+    e = _base(
+        f"🗺️  Select Provinces to Annex  —  {defender_name}",
+        (
+            f"**War Score Available:** {score:.1f}  |  **Cost:** {PROVINCE_COST} per province\n"
+            f"Select the provinces you wish to annex from the dropdown below.\n"
+            f"*(Only fully occupied provinces are shown.)*"
+        ),
+        COL_RED,
+    )
+    if provinces:
+        rows = []
+        for p in provinces[:20]:
+            chk   = "☑️" if p["province_id"] in already_selected else "☐"
+            res   = RESOURCE_EMOJI.get(p.get("resource_type", ""), "🏙️")
+            pop   = _fmt_pop(p.get("population", 0))
+            rows.append(f"{chk} {res} **{p['province_name']}** (pop {pop})")
+        e.add_field(name="🏰  Available Provinces", value="\n".join(rows), inline=False)
+    else:
+        e.add_field(name="⚠️  No Provinces", value="No occupied provinces available.", inline=False)
+    return e
+
+
+def confirm_demands_embed(
+    winner_name:        str,
+    loser_name:         str,
+    selected_opts:      set[str],
+    selected_provinces: list[str],
+    province_names:     dict[str, str],
+    total_cost:         float,
+    score_before:       float,
+) -> discord.Embed:
+    e = discord.Embed(title="📜  Confirm Demands", colour=COL_ORANGE)
+    e.set_thumbnail(url=THUMB)
+    e.set_footer(text="WW1 Roleplay  •  These terms are final.")
+
+    lines = [
+        f"**Winner:** {winner_name}",
+        f"**Loser:**  {loser_name}",
+        "",
+    ]
+
+    if "occupy" in selected_opts and selected_provinces:
+        pnames = [province_names.get(p, p) for p in selected_provinces]
+        lines.append(f"⚔️  **Annex Provinces:** {', '.join(pnames)}")
+        lines.append(f"   *(−{PROVINCE_COST * len(selected_provinces)} war score)*")
+    if "puppet" in selected_opts:
+        lines.append(f"🤝  **Puppet State** — {loser_name} forced into vassalage (−{PUPPET_COST})")
+    if "insult" in selected_opts:
+        lines.append(f"😤  **Insult** — +5 your opinion, −10 {loser_name} diplomacy (−{INSULT_COST})")
+    if "reparations" in selected_opts:
+        lines.append(
+            f"💰  **War Reparations** — {loser_name} −20% efficiency, you +1.5 daily income "
+            f"for 2 years (−{REPARATIONS_COST})"
+        )
+
+    lines += [
+        "",
+        f"**Total War Score Used:** {total_cost:.0f}",
+        f"**Remaining After:** {score_before - total_cost:.1f}",
+    ]
+
+    e.description = "\n".join(lines)
+    return e
+
+
+# ── Province management embeds ─────────────────────────────────────────────────
+
+def non_core_province_embed(
+    country_name: str,
+    provinces:    list[dict],
+    date_str:     str,
+    selected:     list[str] | None = None,
+    conv_days:    int = 90,
+) -> discord.Embed:
+    selected = selected or []
+    if not provinces:
+        return _base(
+            f"🏛️  {country_name} — No Non-Core Provinces",
+            "All your provinces are already cores. Nothing to convert.",
+            COL_GREY,
+        )
+
+    e = _base(
+        f"🏛️  Non-Core Provinces  —  {country_name}  ({date_str})",
+        (
+            f"Select provinces to begin core conversion.\n"
+            f"**Conversion Time:** {conv_days} days per province"
+        ),
+        COL_TEAL,
+    )
+
+    rows = []
+    for p in provinces[:20]:
+        chk = "☑️" if p["province_id"] in selected else "☐"
+        pop = _fmt_pop(p.get("population", 0))
+        res = RESOURCE_EMOJI.get(p.get("resource_type", ""), "🏙️")
+        rows.append(f"{chk} {res} **{p['province_name']}** — pop {pop}")
+    e.add_field(name=f"🗂️  Provinces ({len(provinces)} non-core)", value="\n".join(rows), inline=False)
+
+    if selected:
+        e.add_field(
+            name="📋  Selection Summary",
+            value=(
+                f"**Selected:** {len(selected)} province(s)\n"
+                f"**Conversion time:** {conv_days} days each\n"
+                f"*Click Confirm to begin.*"
+            ),
+            inline=False,
+        )
+    return e
+
+
+def religion_province_embed(
+    country_name:     str,
+    country_religion: str,
+    provinces:        list[dict],
+    date_str:         str,
+    selected:         list[str] | None = None,
+    conv_days:        int = 120,
+) -> discord.Embed:
+    selected = selected or []
+    rel_emoji = RELIGION_EMOJI.get(country_religion, "⛪")
+
+    if not provinces:
+        return _base(
+            f"⛪  {country_name} — No Mismatched Provinces",
+            f"All your provinces already follow **{country_religion}**.",
+            COL_GREY,
+        )
+
+    e = _base(
+        f"⛪  Religion Conversion  —  {country_name}  ({date_str})",
+        (
+            f"Provinces below do not follow the state religion.\n"
+            f"**State Religion:** {rel_emoji} {country_religion}\n"
+            f"**Conversion Time:** {conv_days} days per province"
+        ),
+        COL_PURPLE,
+    )
+
+    rows = []
+    for p in provinces[:20]:
+        chk   = "☑️" if p["province_id"] in selected else "☐"
+        prel  = p.get("province_religion", "Unknown")
+        pemoji = RELIGION_EMOJI.get(prel, "❓")
+        pop   = _fmt_pop(p.get("population", 0))
+        rows.append(f"{chk} {pemoji} **{p['province_name']}** — {prel} → {country_religion}")
+    e.add_field(name=f"⛪  Mismatched Provinces ({len(provinces)})", value="\n".join(rows), inline=False)
+
+    if selected:
+        e.add_field(
+            name="📋  Selection Summary",
+            value=(
+                f"**Selected:** {len(selected)} province(s)\n"
+                f"**Conversion time:** {conv_days} days each\n"
+                f"*Click Confirm to begin.*"
+            ),
+            inline=False,
+        )
+    return e
+
+
+# ── Battle feedback embeds ─────────────────────────────────────────────────────
+
+def battle_start_embed(
+    province_name: str,
+    att_country:   str,
+    def_country:   str,
+    att_strength:  float,
+    def_strength:  float,
+    nm:            dict[str, str] | None = None,
+) -> discord.Embed:
+    nm = nm or {}
+    att_name = nm.get(att_country, att_country)
+    def_name = nm.get(def_country, def_country)
+
+    def _bar(pct: float) -> str:
+        filled = int(pct / 10)
+        return "█" * filled + "░" * (10 - filled)
+
+    e = discord.Embed(title="⚔️  Battle Started!", colour=COL_RED)
+    e.set_thumbnail(url=THUMB)
+    e.set_footer(text="WW1 Roleplay  •  Battle will last 20 game days")
+    e.add_field(
+        name=f"📍  Province: {province_name}",
+        value=(
+            f"**Attacker:** {att_name}  `{_bar(att_strength)}` {att_strength:.0f}%\n"
+            f"**Defender:** {def_name}  `{_bar(def_strength)}` {def_strength:.0f}%"
+        ),
+        inline=False,
+    )
+    return e
+
+
+def battle_result_embed(
+    province_name:  str,
+    winner_country: str,
+    loser_country:  str,
+    att_str_after:  float,
+    def_str_after:  float,
+    score_delta:    float,
+    nm:             dict[str, str] | None = None,
+) -> discord.Embed:
+    nm = nm or {}
+    win_name  = nm.get(winner_country, winner_country)
+    lose_name = nm.get(loser_country, loser_country)
+
+    e = discord.Embed(title="🏁  Battle Result", colour=COL_GOLD)
+    e.set_thumbnail(url=THUMB)
+    e.set_footer(text="WW1 Roleplay  •  prefix: rp")
+    e.add_field(
+        name=f"📍  {province_name}",
+        value=(
+            f"🏆 **Winner:** {win_name}\n"
+            f"💀 **Defeated:** {lose_name}\n\n"
+            f"**Attacker strength after:** {att_str_after:.1f}%\n"
+            f"**Defender strength after:** {def_str_after:.1f}%\n"
+            f"**War score swing:** {score_delta:+.0f}"
+        ),
+        inline=False,
+    )
+    return e

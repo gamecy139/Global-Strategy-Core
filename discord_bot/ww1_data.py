@@ -1628,3 +1628,155 @@ def get_active_wars_all() -> list[dict]:
             (SERVER_ID, SCENARIO_ID),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ── Victory / Province helpers ─────────────────────────────────────────────────
+
+def get_occupied_provinces_by_winner(war_id: str, winner_id: str) -> list[dict]:
+    """Provinces fully occupied by winner in this war (available to annex)."""
+    db   = _get_shared_war_db()
+    occs = db.get_war_occupations(war_id)
+    result: list[dict] = []
+    with _conn() as con:
+        for occ in occs:
+            if occ.get("occupying_country") == winner_id and occ.get("is_occupied"):
+                row = con.execute(
+                    "SELECT * FROM provinces "
+                    "WHERE server_id=? AND scenario_id=? AND province_id=?",
+                    (SERVER_ID, SCENARIO_ID, occ["province_id"]),
+                ).fetchone()
+                if row:
+                    result.append(dict(row))
+    return result
+
+
+def get_non_core_provinces(country_id: str) -> list[dict]:
+    """Provinces owned by country_id that are non-core (is_core=0)."""
+    with _conn() as con:
+        rows = con.execute(
+            """
+            SELECT p.province_id, p.province_name, p.resource_type, p.population,
+                   pc.conversion_end_day
+            FROM provinces p
+            JOIN province_cores pc
+              ON pc.province_id  = p.province_id
+             AND pc.server_id   = p.server_id
+             AND pc.scenario_id = p.scenario_id
+             AND pc.country_id  = ?
+            WHERE p.server_id=? AND p.scenario_id=? AND p.owner_country=?
+              AND pc.is_core = 0
+            ORDER BY p.province_name
+            """,
+            (country_id, SERVER_ID, SCENARIO_ID, country_id),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_country_religion(country_id: str) -> str | None:
+    """Return the country's state religion, or None."""
+    with _conn() as con:
+        row = con.execute(
+            "SELECT religion FROM country_religions "
+            "WHERE server_id=? AND scenario_id=? AND country_id=?",
+            (SERVER_ID, SCENARIO_ID, country_id),
+        ).fetchone()
+    return row["religion"] if row else None
+
+
+def get_different_religion_provinces(country_id: str) -> list[dict]:
+    """Provinces owned by country_id whose religion differs from the country's religion."""
+    crel = get_country_religion(country_id)
+    if crel is None:
+        return []
+    with _conn() as con:
+        rows = con.execute(
+            """
+            SELECT p.province_id, p.province_name, p.resource_type, p.population,
+                   COALESCE(pr.religion, 'Unknown') AS province_religion
+            FROM provinces p
+            LEFT JOIN province_religions pr
+              ON pr.province_id  = p.province_id
+             AND pr.server_id   = p.server_id
+             AND pr.scenario_id = p.scenario_id
+            WHERE p.server_id=? AND p.scenario_id=? AND p.owner_country=?
+              AND (pr.religion IS NULL OR pr.religion != ?)
+            ORDER BY p.province_name
+            """,
+            (SERVER_ID, SCENARIO_ID, country_id, crel),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def start_core_conversion(
+    province_id: str, country_id: str, start_day: int, end_day: int
+) -> None:
+    """Begin a non-core → core conversion for a province."""
+    db = _get_shared_war_db()
+    db.upsert_province_core(
+        SERVER_ID, SCENARIO_ID, province_id, country_id,
+        is_core=0, conversion_start_day=start_day, conversion_end_day=end_day,
+    )
+
+
+def start_religion_conversion(
+    province_id: str, from_religion: str, to_religion: str,
+    start_day: int, end_day: int,
+) -> None:
+    """Begin a religion conversion for a province."""
+    db = _get_shared_war_db()
+    db.upsert_province_religion_conversion(
+        SERVER_ID, SCENARIO_ID, province_id,
+        from_religion, to_religion, start_day, end_day,
+    )
+
+
+def get_opponent_country(war_id: str, country_id: str) -> str | None:
+    """Return the main opposing country (attacker vs defender) in a war."""
+    db  = _get_shared_war_db()
+    war = db.get_war(war_id)
+    if war is None:
+        return None
+    war = dict(war)
+    if war["attacker"] == country_id:
+        return war["defender"]
+    if war["defender"] == country_id:
+        return war["attacker"]
+    return None
+
+
+def war_spend_take_province(
+    war_id: str, winner: str, province_id: str,
+    cost: float, current_day: int,
+) -> dict:
+    res = _get_war_system().spend_take_province(war_id, winner, province_id, cost, current_day)
+    return {"ok": res.ok, "message": res.message,
+            "effects": res.effects, "score_after": res.score_after}
+
+
+def war_spend_puppet(
+    war_id: str, winner: str, loser: str, cost: float, current_day: int,
+) -> dict:
+    res = _get_war_system().spend_puppet_state(war_id, winner, loser, cost, current_day)
+    return {"ok": res.ok, "message": res.message,
+            "effects": res.effects, "score_after": res.score_after}
+
+
+def war_spend_reparations(
+    war_id: str, winner: str, loser: str, cost: float, current_day: int,
+) -> dict:
+    res = _get_war_system().spend_reparations(war_id, winner, loser, cost, current_day)
+    return {"ok": res.ok, "message": res.message,
+            "effects": res.effects, "score_after": res.score_after}
+
+
+def war_spend_insult(
+    war_id: str, winner: str, loser: str, cost: float,
+) -> dict:
+    res = _get_war_system().spend_insult(war_id, winner, loser, cost)
+    return {"ok": res.ok, "message": res.message,
+            "effects": res.effects, "score_after": res.score_after}
+
+
+def war_end(war_id: str, status: str = "attacker_victory") -> dict:
+    msg = _get_war_system().end_war(war_id, status)
+    return {"ok": True, "message": msg}
