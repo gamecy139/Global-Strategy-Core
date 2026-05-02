@@ -796,16 +796,21 @@ def find_research_target(query: str) -> dict | None:
 # ── Army ─────────────────────────────────────────────────────────────────────
 
 def get_army_summary(country_id: str, game_day: int = 0) -> dict:
+    country = get_country_by_id(country_id)
+    country_slug = (
+        country["country_name"].replace(" ", "_") if country else country_id
+    )
     with _conn() as con:
         armies = con.execute(
             "SELECT army_id, province_id, state, strength_pct, recruitment_end_day "
             "FROM armies "
-            "WHERE server_id=? AND scenario_id=? AND country_id=?",
+            "WHERE server_id=? AND scenario_id=? AND country_id=? "
+            "ORDER BY rowid",
             (SERVER_ID, SCENARIO_ID, country_id),
         ).fetchall()
         total_units = 0
         army_list   = []
-        for a in armies:
+        for idx, a in enumerate(armies, start=1):
             units = con.execute(
                 "SELECT unit_name, quantity FROM army_units WHERE army_id=?",
                 (a["army_id"],),
@@ -815,13 +820,21 @@ def get_army_summary(country_id: str, game_day: int = 0) -> dict:
             end_day    = int(a["recruitment_end_day"] or 0)
             remaining  = max(0, end_day - game_day) if state == "recruiting" else 0
 
+            # Resolve province name (fall back to province_id if not found)
+            prov_row = con.execute(
+                "SELECT province_name FROM provinces "
+                "WHERE server_id=? AND scenario_id=? AND province_id=?",
+                (SERVER_ID, SCENARIO_ID, a["province_id"]),
+            ).fetchone()
+            province_name = prov_row["province_name"] if prov_row else str(a["province_id"])
+
             # Only count fully-ready units toward total
             if state != "recruiting":
                 total_units += unit_count
 
             army_list.append({
-                "army_id":           a["army_id"][:8],
-                "province_id":       a["province_id"],
+                "army_label":        f"{country_slug}_army_{idx}",
+                "province_name":     province_name,
                 "state":             state,
                 "strength_pct":      a["strength_pct"],
                 "unit_count":        unit_count,

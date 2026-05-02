@@ -377,14 +377,14 @@ def my_country_military_embed(country: dict, owner: str, date: str,
                 m, d = divmod(rem, 30)
                 time_str = f"{m}m {d}d" if m else f"{d}d"
                 lines.append(
-                    f"🔨 **Army `{a['army_id']}`** — Province {a['province_id']} "
+                    f"🔨 **{a['army_label']}** — {a['province_name']} "
                     f"— *recruiting* (**{time_str} remaining**)"
                 )
                 for u in a["units"]:
                     lines.append(f"  ↳ {u['unit_name']}: {u['quantity']:,}")
             else:
                 lines.append(
-                    f"⚔️ **Army `{a['army_id']}`** — Province {a['province_id']} "
+                    f"⚔️ **{a['army_label']}** — {a['province_name']} "
                     f"({a['strength_pct']:.0f}% strength) — **{a['unit_count']} units**"
                 )
                 for u in a["units"]:
