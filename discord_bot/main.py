@@ -90,6 +90,15 @@ class RoleplayBot(commands.Bot):
 
     async def setup_hook(self):
         game_state.init()
+
+        # Seed troop definitions so validate_recruitment always finds every unit
+        try:
+            from discord_bot.ww1_data import _ensure_troop_definitions_seeded
+            _ensure_troop_definitions_seeded()
+            log.info("Troop definitions seeded.")
+        except Exception as exc:
+            log.warning("Troop-definition seeding failed (non-fatal): %s", exc)
+
         await self.load_extension("discord_bot.cogs.game")
         await self.load_extension("discord_bot.cogs.economy")
         await self.load_extension("discord_bot.cogs.recruit")

@@ -812,24 +812,90 @@ def get_army_summary(country_id: str) -> dict:
 SLOT_ORDER = ["F1", "F2", "FL1", "S1", "S2", "N1"]
 
 
+def _ensure_troop_definitions_seeded() -> None:
+    """
+    Idempotently seed troop_definitions for the scenario.
+    Safe to call on every request — INSERT OR IGNORE makes it a no-op after first run.
+    """
+    from ww1_economy.troop_definition_system import TroopDefinitionSystem
+    from ww1_economy.military_tech_system    import MilitaryTechSystem
+    db = _get_econ_db()
+    TroopDefinitionSystem(db, MilitaryTechSystem(db)).seed_definitions(SERVER_ID, SCENARIO_ID)
+
+
+def _ensure_mil_tech_bootstrapped(country_id: str) -> None:
+    """
+    If a country has zero rows in military_technologies, grant the root doctrine
+    so it can at least start researching.  This is a safety net for countries
+    that were never run through init_ww1_scenario.
+    """
+    db   = _get_econ_db()
+    rows = db.get_military_technologies_for_country(SERVER_ID, SCENARIO_ID, country_id)
+    if not rows:
+        import logging
+        logging.getLogger("bot").warning(
+            "Country %s has no military_technologies rows — "
+            "auto-granting pre_industrial_military_doctrine.", country_id
+        )
+        db.upsert_military_technology(
+            SERVER_ID, SCENARIO_ID, country_id,
+            "pre_industrial_military_doctrine",
+            is_unlocked=True,
+        )
+
+
 def get_recruitable_slots(country_id: str) -> dict[str, dict]:
     """
-    Return {slot: best_unit_row} for every slot the country has at least one
-    unlocked unit in.  'Best' = highest battle_points among unlocked units.
+    Return {slot: best_unit_dict} for every slot where the country has at
+    least one unlocked unit.  'Best' = highest battle_points.
+
+    Works entirely from static UNIT_DEFINITIONS + MILITARY_TECH_TREE data;
+    does NOT depend on the troop_definitions DB table being seeded.
     """
+    import logging
     from ww1_economy.unit_data            import UNIT_DEFINITIONS
+    from ww1_economy.military_tech_data   import UNIT_TECH_REQUIREMENTS
     from ww1_economy.military_tech_system import MilitaryTechSystem
+
+    log = logging.getLogger("bot")
 
     db      = _get_econ_db()
     mil_sys = MilitaryTechSystem(db)
 
+    # Safety net: if the country has never been through init_ww1_scenario,
+    # grant the root doctrine so they at least have something.
+    _ensure_mil_tech_bootstrapped(country_id)
+
+    # Snapshot of every unlocked military tech for this country
+    unlocked_techs: set[str] = set(
+        mil_sys.get_unlocked_techs(SERVER_ID, SCENARIO_ID, country_id)
+    )
+    log.debug("Country %s — unlocked mil-techs: %s", country_id, sorted(unlocked_techs))
+
     by_slot: dict[str, list] = {}
     for udef in UNIT_DEFINITIONS.values():
-        ok, _ = mil_sys.validate_recruitment(SERVER_ID, SCENARIO_ID, country_id, udef.unit_name)
-        if ok:
-            row = db.get_troop_definition(SERVER_ID, SCENARIO_ID, udef.unit_name)
-            if row:
-                by_slot.setdefault(udef.category, []).append(row)
+        required_tech = UNIT_TECH_REQUIREMENTS.get(udef.unit_name)
+        if required_tech is None:
+            # Unit has no tech gate — always available
+            available = True
+        else:
+            available = required_tech in unlocked_techs
+
+        if available:
+            unit_dict = {
+                "unit_name":             udef.unit_name,
+                "category":              udef.category,
+                "required_tech":         required_tech or "",
+                "population_required":   udef.population_required,
+                "gold_cost":             float(udef.gold_cost),
+                "recruitment_time_days": udef.recruitment_time_days,
+                "speed_modifier":        float(udef.speed_modifier),
+                "battle_points":         udef.battle_points,
+            }
+            by_slot.setdefault(udef.category, []).append(unit_dict)
+
+    available_units = [u["unit_name"] for units in by_slot.values() for u in units]
+    log.debug("Country %s — available units: %s", country_id, sorted(available_units))
 
     return {
         slot: max(units, key=lambda u: u["battle_points"])
@@ -908,13 +974,22 @@ def execute_army_recruitment(
 
     unit_slots = {k: v for k, v in selections.items() if k != "_province_id"}
 
-    # ── 1. Tech gate ──────────────────────────────────────────────────────────
+    # ── 1. Tech gate (bypass troop_definitions — check is_tech_unlocked directly) ──
+    from ww1_economy.military_tech_data import UNIT_TECH_REQUIREMENTS
+    unlocked_techs: set[str] = set(
+        mil_sys.get_unlocked_techs(SERVER_ID, SCENARIO_ID, country_id)
+    )
     for slot, sel in unit_slots.items():
-        ok, reason = mil_sys.validate_recruitment(
-            SERVER_ID, SCENARIO_ID, country_id, sel["unit_name"]
-        )
-        if not ok:
-            return {"ok": False, "reason": f"**{sel['unit_name']}**: {reason}"}
+        uname         = sel["unit_name"]
+        required_tech = UNIT_TECH_REQUIREMENTS.get(uname)
+        if required_tech and required_tech not in unlocked_techs:
+            return {
+                "ok":     False,
+                "reason": (
+                    f"**{uname}** requires military tech "
+                    f"**{required_tech}** which is not yet unlocked."
+                ),
+            }
 
     # ── 2. Cap info ───────────────────────────────────────────────────────────
     cap      = get_recruitment_cap_info(country_id, current_month)
