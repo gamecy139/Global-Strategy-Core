@@ -1,0 +1,280 @@
+You are updating an existing WW1 scenario database.
+
+IMPORTANT:
+- DO NOT create new countries
+- DO NOT delete existing data
+- ONLY update existing country records
+- Match using country_name
+- Use server_id + scenario_id
+
+--------------------------------------------------
+1. UPDATE COUNTRY CORE DATA
+--------------------------------------------------
+
+Add / update the following fields for each country:
+
+- religion
+- treasury
+- daily_income
+- population_opinion
+- tax_level = "Standard Taxation"
+- economy_efficiency = 100
+- current_research = NULL
+
+--------------------------------------------------
+
+Germany:
+religion = Protestant Christian
+treasury = 600
+daily_income = 8
+population_opinion = 70
+
+Russian Empire:
+religion = Orthodox Christian
+treasury = 400
+daily_income = 4
+population_opinion = 50
+
+United Kingdom:
+religion = Protestant Christian
+treasury = 500
+daily_income = 7
+population_opinion = 55
+
+Ottoman Empire:
+religion = Sunni Islam
+treasury = 230
+daily_income = 3
+population_opinion = 45
+
+Austrian Empire:
+religion = Catholic Christian
+treasury = 400
+daily_income = 5
+population_opinion = 45
+
+France:
+religion = Atheism
+treasury = 320
+daily_income = 5
+population_opinion = 60
+
+Italy:
+religion = Catholic Christian
+treasury = 200
+daily_income = 3
+population_opinion = 60
+
+Greece:
+religion = Orthodox Christian
+treasury = 100
+daily_income = 2
+population_opinion = 50
+
+Serbia:
+religion = Orthodox Christian
+treasury = 80
+daily_income = 1
+population_opinion = 40
+
+Bulgaria:
+religion = Orthodox Christian
+treasury = 120
+daily_income = 2
+population_opinion = 40
+
+Romania:
+religion = Orthodox Christian
+treasury = 200
+daily_income = 3
+population_opinion = 50
+
+Albania:
+religion = Sunni Islam
+treasury = 80
+daily_income = 1
+population_opinion = 35
+
+Belgium:
+religion = Catholic Christian
+treasury = 180
+daily_income = 3
+population_opinion = 60
+
+Netherlands:
+religion = Protestant Christian
+treasury = 150
+daily_income = 3
+population_opinion = 55
+
+Denmark:
+religion = Protestant Christian
+treasury = 120
+daily_income = 2
+population_opinion = 50
+
+Sweden:
+religion = Protestant Christian
+treasury = 180
+daily_income = 3
+population_opinion = 45
+
+Norway:
+religion = Protestant Christian
+treasury = 120
+daily_income = 1
+population_opinion = 45
+
+Spain:
+religion = Catholic Christian
+treasury = 200
+daily_income = 2
+population_opinion = 60
+
+Portugal:
+religion = Catholic Christian
+treasury = 180
+daily_income = 3
+population_opinion = 50
+
+Switzerland:
+religion = Protestant Christian
+treasury = 230
+daily_income = 4
+population_opinion = 70
+
+--------------------------------------------------
+2. INITIALIZE DIPLOMACY
+--------------------------------------------------
+
+For ALL country pairs:
+- set base_relation = 50
+
+(Only insert if relation does not already exist)
+
+--------------------------------------------------
+3. INITIALIZE TECHNOLOGY
+--------------------------------------------------
+
+For each country:
+
+- Add field: unlocked_technologies (array)
+- Add field: current_research = NULL
+
+--------------------------------------------------
+TIER ASSIGNMENT
+
+Tier 1:
+Germany, United Kingdom, France
+
+Tier 2:
+Russian Empire, Austrian Empire, Italy
+
+Tier 3:
+Ottoman Empire, Netherlands, Denmark, Sweden, Spain, Belgium, Switzerland, Romania
+
+Tier 4:
+Portugal, Norway, Albania, Bulgaria, Serbia, Greece
+
+--------------------------------------------------
+ASSIGN TECHNOLOGY BASED ON TIER
+--------------------------------------------------
+
+Tier 1:
+
+Economic:
+Industrialization, Chemical Processing
+
+Infrastructure:
+Early Modern Infrastructure, Hospital, Library, School
+
+Reforms:
+Foundational Governance, National Identity Program, Banks
+
+Military:
+Pre-Industrial Military Doctrine
+Line Infantry, Elite Line Infantry, Grenadier, Elite Grenadier
+Heavy Cavalry, Elite Cavalry
+Elite Archers, Recon Rifleman
+Cannons, Elite Cannons
+Naval Warfare Doctrine
+Gunboats, Early Battleships, Battleships
+Modern Warfare Doctrine
+Riflemen, Early Trench Infantry
+
+--------------------------------------------------
+
+Tier 2:
+
+Economic:
+Industrialization
+
+Infrastructure:
+Early Modern Infrastructure, Hospital, Library
+
+Reforms:
+Foundational Governance, War Mobilization Act
+
+Military:
+Pre-Industrial Military Doctrine
+Line Infantry, Elite Line Infantry, Grenadier, Elite Grenadier
+Heavy Cavalry, Elite Cavalry
+Elite Archers, Recon Rifleman
+Cannons, Elite Cannons
+Naval Warfare Doctrine
+Gunboats, Early Battleships, Battleships
+Modern Warfare Doctrine
+Riflemen
+
+--------------------------------------------------
+
+Tier 3:
+
+Economic:
+Industrialization
+
+Infrastructure:
+Early Modern Infrastructure, Library
+
+Reforms:
+Foundational Governance
+
+Military:
+Pre-Industrial Military Doctrine
+Line Infantry, Elite Line Infantry
+Heavy Cavalry, Elite Cavalry
+Elite Archers
+Cannons, Elite Cannons
+Naval Warfare Doctrine
+Gunboats, Early Battleships
+
+--------------------------------------------------
+
+Tier 4:
+
+Economic:
+Industrialization, Chemical Processing, Powder Mill, Pharmaceutical Plant
+
+Infrastructure:
+Early Modern Infrastructure, Library
+
+Reforms:
+Foundational Governance
+
+Military:
+Pre-Industrial Military Doctrine
+Line Infantry, Elite Line Infantry, Grenadier
+Heavy Cavalry
+Elite Archers
+Cannons
+Naval Warfare Doctrine
+Gunboats
+
+--------------------------------------------------
+FINAL CHECK
+--------------------------------------------------
+
+- Do NOT duplicate countries
+- Only update existing rows
+- Ensure all countries now have:
+  religion, treasury, income, opinion, tech, diplomacy
