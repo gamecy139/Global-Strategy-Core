@@ -1041,7 +1041,7 @@ def execute_army_recruitment(
         unit = sel["unit"]
         g    = float(unit["gold_cost"]) * qty * (3 if penalty else 1)
         p    = int(unit["population_required"]) * qty
-        t    = int(unit["recruitment_time_days"]) * qty
+        t    = int(unit["recruitment_time_days"])
         if penalty:
             t = int(t * 1.5)
         total_gold += g
