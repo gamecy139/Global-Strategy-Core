@@ -4,6 +4,30 @@
 
 pnpm workspace monorepo using TypeScript. Each package manages its own dependencies.
 
+## Discord Bot (`discord_bot/`)
+
+Live Discord bot with prefix **`rp`**. Runs via the **"Discord Bot"** workflow (`python3 -m discord_bot.main`). Requires `DISCORD_TOKEN` secret.
+
+| File | Purpose |
+|---|---|
+| `discord_bot/main.py` | Bot entry point — `RoleplayBot` class, cog loader, error handler |
+| `discord_bot/game_state.py` | SQLite-backed session + country-assignment store (`bot_state.db`) |
+| `discord_bot/ww1_data.py` | Read-only bridge to `ww1_scenario.db` (countries, religions, populations) |
+| `discord_bot/embeds.py` | All `discord.Embed` builders in one place |
+| `discord_bot/cogs/game.py` | Commands: `rp help`, `rp start`, `rp countries`, `rp select` |
+
+### Commands
+| Command | Description |
+|---|---|
+| `rp help` | Embed listing all commands |
+| `rp start` | Dropdown to choose scenario (WW1); marks game as active |
+| `rp countries` | Paginated embed — all 20 nations with religion & population |
+| `rp select <name>` | Assigns a country to the calling user |
+
+### State DBs
+- `ww1_scenario.db` — game/economic data (server_id=`guild_demo`, scenario_id=`ww1`)
+- `bot_state.db` — bot runtime state (game sessions, country assignments)
+
 ## Discord Strategy Roleplay Bot — Python Backend
 
 Pure Python backend game logic lives in `game_backend/`. No Discord commands, no UI.
