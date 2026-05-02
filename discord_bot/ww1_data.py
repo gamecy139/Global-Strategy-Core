@@ -807,6 +807,229 @@ def get_army_summary(country_id: str) -> dict:
     return {"total_units": total_units, "armies": army_list}
 
 
+# ── Army Recruitment ──────────────────────────────────────────────────────────
+
+SLOT_ORDER = ["F1", "F2", "FL1", "S1", "S2", "N1"]
+
+
+def get_recruitable_slots(country_id: str) -> dict[str, dict]:
+    """
+    Return {slot: best_unit_row} for every slot the country has at least one
+    unlocked unit in.  'Best' = highest battle_points among unlocked units.
+    """
+    from ww1_economy.unit_data            import UNIT_DEFINITIONS
+    from ww1_economy.military_tech_system import MilitaryTechSystem
+
+    db      = _get_econ_db()
+    mil_sys = MilitaryTechSystem(db)
+
+    by_slot: dict[str, list] = {}
+    for udef in UNIT_DEFINITIONS.values():
+        ok, _ = mil_sys.validate_recruitment(SERVER_ID, SCENARIO_ID, country_id, udef.unit_name)
+        if ok:
+            row = db.get_troop_definition(SERVER_ID, SCENARIO_ID, udef.unit_name)
+            if row:
+                by_slot.setdefault(udef.category, []).append(row)
+
+    return {
+        slot: max(units, key=lambda u: u["battle_points"])
+        for slot, units in by_slot.items()
+    }
+
+
+def get_recruitment_cap_info(country_id: str, current_month: int) -> dict:
+    """
+    Returns recruitment cap data.  Auto-resets used % every 3 months.
+    Keys: total_pop, used_pct, remaining_pct, penalty (bool).
+    """
+    with _conn() as con:
+        row = con.execute(
+            "SELECT total_population, recruitment_used_percent, "
+            "       recruitment_last_reset_month "
+            "FROM countries "
+            "WHERE server_id=? AND scenario_id=? AND country_id=?",
+            (SERVER_ID, SCENARIO_ID, country_id),
+        ).fetchone()
+
+    if row is None:
+        return {"total_pop": 0, "used_pct": 0.0, "remaining_pct": 30.0, "penalty": False}
+
+    total_pop  = int(row["total_population"])
+    used_pct   = float(row["recruitment_used_percent"] or 0.0)
+    last_reset = int(row["recruitment_last_reset_month"] or 0)
+
+    if current_month - last_reset >= 3:
+        used_pct = 0.0
+        con2 = _write_conn()
+        try:
+            con2.execute(
+                "UPDATE countries "
+                "SET recruitment_used_percent=0.0, recruitment_last_reset_month=? "
+                "WHERE server_id=? AND scenario_id=? AND country_id=?",
+                (current_month, SERVER_ID, SCENARIO_ID, country_id),
+            )
+            con2.commit()
+        finally:
+            con2.close()
+
+    remaining_pct = max(0.0, 30.0 - used_pct)
+    penalty       = used_pct > 25.0
+
+    return {
+        "total_pop":     total_pop,
+        "used_pct":      used_pct,
+        "remaining_pct": remaining_pct,
+        "penalty":       penalty,
+    }
+
+
+def execute_army_recruitment(
+    country_id:    str,
+    province_id:   str,
+    province_name: str,
+    selections:    dict,
+    game_day:      int,
+    current_month: int,
+) -> dict:
+    """
+    Full gate-check + execution of one army recruitment order.
+
+    ``selections`` must be {slot: {"unit_name": str, "qty": int, "unit": row_dict}}.
+    A key "_province_id" is ignored if present.
+
+    Returns {"ok": True, "army_id", "total_gold", "total_pop", "total_days", "penalty"}
+    or      {"ok": False, "reason": str}.
+    """
+    import uuid
+    from ww1_economy.military_tech_system import MilitaryTechSystem
+
+    db      = _get_econ_db()
+    mil_sys = MilitaryTechSystem(db)
+
+    unit_slots = {k: v for k, v in selections.items() if k != "_province_id"}
+
+    # ── 1. Tech gate ──────────────────────────────────────────────────────────
+    for slot, sel in unit_slots.items():
+        ok, reason = mil_sys.validate_recruitment(
+            SERVER_ID, SCENARIO_ID, country_id, sel["unit_name"]
+        )
+        if not ok:
+            return {"ok": False, "reason": f"**{sel['unit_name']}**: {reason}"}
+
+    # ── 2. Cap info ───────────────────────────────────────────────────────────
+    cap      = get_recruitment_cap_info(country_id, current_month)
+    total_pop_country = cap["total_pop"]
+    penalty           = cap["penalty"]
+    remaining_pct     = cap["remaining_pct"]
+
+    if remaining_pct < 5.0:
+        return {
+            "ok": False,
+            "reason": (
+                f"Recruitment cap exhausted — only **{remaining_pct:.1f}%** remaining "
+                f"(minimum 5% required).\nThe cap resets every 3 months."
+            ),
+        }
+
+    # ── 3. Totals (with penalty if applicable) ────────────────────────────────
+    total_gold = 0.0
+    total_pop  = 0
+    total_time = 0
+
+    for slot, sel in unit_slots.items():
+        qty  = sel["qty"]
+        unit = sel["unit"]
+        g    = float(unit["gold_cost"]) * qty * (3 if penalty else 1)
+        p    = int(unit["population_required"]) * qty
+        t    = int(unit["recruitment_time_days"]) * qty
+        if penalty:
+            t = int(t * 1.5)
+        total_gold += g
+        total_pop  += p
+        total_time  = max(total_time, t)
+
+    # ── 4. Gold check ─────────────────────────────────────────────────────────
+    with _conn() as con:
+        crow = con.execute(
+            "SELECT treasury FROM countries "
+            "WHERE server_id=? AND scenario_id=? AND country_id=?",
+            (SERVER_ID, SCENARIO_ID, country_id),
+        ).fetchone()
+    treasury = float(crow["treasury"] or 0.0) if crow else 0.0
+
+    if treasury < total_gold:
+        return {
+            "ok": False,
+            "reason": (
+                f"Not enough gold.\n"
+                f"Required: **{total_gold:,.0f}** gold  •  "
+                f"Treasury: **{treasury:,.0f}** gold."
+            ),
+        }
+
+    # ── 5. Population cap check ───────────────────────────────────────────────
+    recruitable_pop = int(total_pop_country * remaining_pct / 100.0)
+    if total_pop > recruitable_pop:
+        return {
+            "ok": False,
+            "reason": (
+                f"Not enough recruitable population.\n"
+                f"Required: **{total_pop:,}**  •  "
+                f"Available: **{recruitable_pop:,}** "
+                f"({remaining_pct:.1f}% of {total_pop_country:,} total)."
+            ),
+        }
+
+    # ── 6. Execute ────────────────────────────────────────────────────────────
+    used_pct_added = (total_pop / total_pop_country * 100.0) if total_pop_country > 0 else 0.0
+
+    deduct_treasury(country_id, total_gold)
+
+    con2 = _write_conn()
+    try:
+        con2.execute(
+            "UPDATE countries "
+            "SET total_population           = total_population - ?, "
+            "    recruitment_used_percent   = recruitment_used_percent + ? "
+            "WHERE server_id=? AND scenario_id=? AND country_id=?",
+            (total_pop, used_pct_added, SERVER_ID, SCENARIO_ID, country_id),
+        )
+        con2.commit()
+    finally:
+        con2.close()
+
+    army_id = str(uuid.uuid4())
+    db.insert_army(
+        army_id          = army_id,
+        server_id        = SERVER_ID,
+        scenario_id      = SCENARIO_ID,
+        country_id       = country_id,
+        province_id      = str(province_id),
+        base_province_id = str(province_id),
+        last_supply_day  = game_day,
+    )
+    db.update_army_fields(army_id, state="recruiting")
+
+    for slot, sel in unit_slots.items():
+        db.upsert_army_unit(
+            army_unit_id = str(uuid.uuid4()),
+            army_id      = army_id,
+            unit_name    = sel["unit_name"],
+            quantity     = sel["qty"],
+            server_id    = SERVER_ID,
+            scenario_id  = SCENARIO_ID,
+        )
+
+    return {
+        "ok":         True,
+        "army_id":    army_id,
+        "total_gold": total_gold,
+        "total_pop":  total_pop,
+        "total_days": total_time,
+        "penalty":    penalty,
+    }
+
+
 # ── Formatting ────────────────────────────────────────────────────────────────
 
 def fmt_pop(n: int | float) -> str:

@@ -246,7 +246,9 @@ class EconomyDB:
             ("in_active_war",           "INTEGER NOT NULL DEFAULT 0"),
             ("population_opinion",      "INTEGER NOT NULL DEFAULT 50"),
             ("unrest",                  "REAL    NOT NULL DEFAULT 0.0"),
-            ("population_growth_rate",  "REAL    NOT NULL DEFAULT 0.6"),
+            ("population_growth_rate",      "REAL    NOT NULL DEFAULT 0.6"),
+            ("recruitment_used_percent",    "REAL    NOT NULL DEFAULT 0.0"),
+            ("recruitment_last_reset_month","INTEGER NOT NULL DEFAULT 0"),
         ]
         for name, typedef in new_cols:
             if name not in cols:

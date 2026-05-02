@@ -80,6 +80,7 @@ def help_embed() -> discord.Embed:
         ("rp rr `<reform>`",              "Remove / unadopt an active reform."),
         ("rp taxation",                   "Set your tax policy (affects income & opinion)."),
         ("rp gm",                         "Open the Global Market to buy resources."),
+        ("rp recruit_army / rp ra",       "Recruit an army in one of your provinces."),
     ]
     for name, desc in cmds:
         e.add_field(name=f"`{name}`", value=desc, inline=False)
@@ -1039,3 +1040,158 @@ def taxation_changed_embed(
         f"💰 **Income modifier:** `×{tier['multiplier']:.2f}`",
     ]
     return _base("✅  Tax Policy Updated", "\n".join(lines), COL_GREEN)
+
+
+# ── rp recruit_army ───────────────────────────────────────────────────────────
+
+_SLOT_SECTION_HEADERS: dict[str, str | None] = {
+    "F1":  "**Front Line**",
+    "F2":  None,
+    "FL1": "**Flank Line**",
+    "S1":  "**Support Line**",
+    "S2":  None,
+    "N1":  "**Naval Line**",
+}
+_SLOT_ORDER = ["F1", "F2", "FL1", "S1", "S2", "N1"]
+
+
+def recruit_province_embed(country_name: str, province_count: int) -> discord.Embed:
+    return _base(
+        "🏰  Select Province — Army Recruitment",
+        (
+            f"**{country_name}** — choose a province to station your new army.\n\n"
+            f"You control **{province_count}** province(s).\n\n"
+            "Select one from the dropdown below."
+        ),
+        COL_RED,
+    )
+
+
+def recruit_units_embed(
+    country_name:  str,
+    province_name: str,
+    slot_units:    dict,
+    quantities:    dict,
+) -> discord.Embed:
+    lines: list[str] = [f"**Province:** {province_name}\n"]
+    last_section: str | None = None
+
+    for slot in _SLOT_ORDER:
+        header = _SLOT_SECTION_HEADERS.get(slot)
+        if header and header != last_section:
+            lines.append(header)
+            last_section = header
+
+        if slot not in slot_units:
+            lines.append(f"`{slot}` — *Not unlocked*")
+            continue
+
+        unit = slot_units[slot]
+        name = unit["unit_name"]
+        g    = float(unit["gold_cost"])
+        p    = int(unit["population_required"])
+        d    = int(unit["recruitment_time_days"])
+        qty  = quantities.get(slot)
+
+        if qty:
+            lines.append(
+                f"`{slot}` ✅ **{name}** × {qty}"
+                f"  —  {g * qty:,.0f} 💰 / {p * qty:,} 👥 / {d * qty}d ⏱️"
+            )
+        else:
+            lines.append(
+                f"`{slot}` **{name}**"
+                f"  —  {g:,.0f} 💰 / {p} 👥 / {d}d ⏱️  *per unit*"
+            )
+
+    lines.append("")
+    if quantities:
+        lines.append("*Select more categories or click **Continue** when ready.*")
+    else:
+        lines.append("*Select unit categories below, then enter quantities in chat.*")
+
+    return _base("⚔️  Army Recruitment — Unit Selection", "\n".join(lines), COL_RED)
+
+
+def recruit_summary_embed(
+    country_name:  str,
+    province_name: str,
+    selections:    dict,
+    total_gold:    float,
+    total_pop:     int,
+    total_days:    int,
+    treasury:      float,
+    penalty:       bool,
+) -> discord.Embed:
+    unit_lines: list[str] = []
+    for slot in _SLOT_ORDER:
+        if slot not in selections:
+            continue
+        sel = selections[slot]
+        unit_lines.append(f"`{slot}` **{sel['unit_name']}** × {sel['qty']}")
+
+    penalty_note = (
+        "\n\n⚠️ **Over-recruitment penalty active** (>25% cap used)\n"
+        "Cost ×3 and time ×1.5 have been applied."
+    ) if penalty else ""
+
+    return _base(
+        "📋  Recruitment Summary",
+        (
+            f"**Country:** {country_name}\n"
+            f"**Province:** {province_name}\n\n"
+            "**Units to recruit:**\n"
+            + "\n".join(unit_lines)
+            + f"\n\n💰 **Gold Cost:** {total_gold:,.0f}  *(Treasury: {treasury:,.0f})*\n"
+            f"👥 **Population drafted:** {total_pop:,}\n"
+            f"⏱️ **Recruitment Time:** {total_days} days"
+            + penalty_note
+            + "\n\nClick **Start Recruitment** to confirm, or **Cancel** to abort."
+        ),
+        COL_ORANGE,
+    )
+
+
+def recruit_started_embed(
+    province_name: str,
+    selections:    dict,
+    total_gold:    float,
+    total_pop:     int,
+    total_days:    int,
+) -> discord.Embed:
+    unit_lines: list[str] = []
+    for slot in _SLOT_ORDER:
+        if slot not in selections:
+            continue
+        sel = selections[slot]
+        unit_lines.append(f"`{slot}` {sel['unit_name']} × {sel['qty']}")
+
+    return _base(
+        "✅  Army Recruitment Started!",
+        (
+            f"**Province:** {province_name}\n\n"
+            "**Recruiting:**\n"
+            + "\n".join(unit_lines)
+            + f"\n\n💰 **Gold spent:** {total_gold:,.0f}\n"
+            f"👥 **Population drafted:** {total_pop:,}\n"
+            f"⏱️ **Completes in:** {total_days} game-days\n\n"
+            "*Army status: **recruiting**. It will be ready once the timer expires.*"
+        ),
+        COL_GREEN,
+    )
+
+
+def recruit_error_embed(reason: str) -> discord.Embed:
+    return _base("❌  Recruitment Failed", reason, COL_RED)
+
+
+def recruit_no_units_embed(country_name: str) -> discord.Embed:
+    return _base(
+        "🔒  No Units Available",
+        (
+            f"**{country_name}** has no unlocked military units to recruit.\n\n"
+            "Research military technologies to unlock units.\n"
+            "Use **`rp technology`** and browse the **Military** category."
+        ),
+        COL_GREY,
+    )
