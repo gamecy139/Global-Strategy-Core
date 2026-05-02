@@ -49,6 +49,7 @@ _COUNTRY_COLUMNS: frozenset[str] = frozenset({
     "total_population",
     "treasury",
     "daily_base_income",
+    "base_income_floor",
     "tax_multiplier",
     "economy_efficiency",
     "war_victory_end_month",
@@ -234,6 +235,7 @@ class EconomyDB:
         new_cols: list[tuple[str, str]] = [
             ("treasury",                "REAL    NOT NULL DEFAULT 0.0"),
             ("daily_base_income",       "REAL    NOT NULL DEFAULT 0.0"),
+            ("base_income_floor",       "REAL    NOT NULL DEFAULT 0.0"),
             ("tax_multiplier",          "REAL    NOT NULL DEFAULT 1.0"),
             ("economy_efficiency",      "REAL    NOT NULL DEFAULT 1.0"),
             ("war_victory_end_month",   "INTEGER NOT NULL DEFAULT 0"),

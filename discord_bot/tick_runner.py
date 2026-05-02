@@ -98,7 +98,12 @@ async def tick_task() -> None:
 
         # ── Daily tick: building completions, tech/reform completions, income ──
         try:
-            ts.daily_tick(SERVER_ID, SCENARIO_ID, new_game_day, days_advanced)
+            report = ts.daily_tick(SERVER_ID, SCENARIO_ID, new_game_day, days_advanced)
+            # Apply Hospital opinion bonuses for newly completed hospitals
+            from discord_bot.ww1_data import apply_hospital_opinion
+            for bldg in report.building_completions:
+                if bldg.get("building_type") == "Hospital":
+                    apply_hospital_opinion(bldg["country_id"], province_count=1)
         except Exception as e:
             log.warning("Daily tick error: %s", e)
 

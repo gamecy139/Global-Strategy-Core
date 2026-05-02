@@ -379,19 +379,22 @@ def get_active_research_info(country_id: str, game_day: int) -> dict | None:
     return None
 
 
+MAX_RESEARCH_SPEED: float = 10.0
+
+
 def get_research_speed(country_id: str) -> float:
     """
     Returns the final research speed in % per month.
-    base 1.0% + Library +0.5%, School +1.0%, University +1.5%.
-    Clamped to minimum 0.5%.
+    base 1.0% + Library +0.5%, School +1.0%, University +1.5% per completed building.
+    Clamped to [0.5, 10.0]%.
     """
     speed = 1.0
     completed = get_completed_building_types(country_id)
     from ww1_economy.tech_data import RESEARCH_SPEED_BONUSES
     for btype, bonus in RESEARCH_SPEED_BONUSES.items():
-        if btype in completed:
-            speed += bonus
-    return max(0.5, speed)
+        count = sum(1 for b in completed if b == btype)
+        speed += bonus * count
+    return min(MAX_RESEARCH_SPEED, max(0.5, speed))
 
 
 def cancel_active_research(country_id: str, game_day: int) -> dict | None:
@@ -551,6 +554,7 @@ def adopt_reform(country_id: str, reform_id: str) -> dict:
     """
     Adopt a researched reform. Costs 100 gold. Max 3 adopted at once.
     Returns {"ok": True, "new_treasury": float} or {"ok": False, "reason": str}.
+    Also applies the reform's opinion_bonus immediately to the country's opinion.
     """
     from ww1_economy.tech_data import REFORM_TREE, REFORM_ADOPTION_COST, MAX_ADOPTED_REFORMS
 
@@ -577,7 +581,35 @@ def adopt_reform(country_id: str, reform_id: str) -> dict:
         return {"ok": False, "reason": str(e)}
 
     db.adopt_reform(SERVER_ID, SCENARIO_ID, country_id, reform_id)
+
+    # Apply opinion bonus immediately
+    if rdef.opinion_bonus:
+        _apply_opinion_delta(country_id, rdef.opinion_bonus)
+
     return {"ok": True, "new_treasury": new_bal, "adopted_count": len(adopted) + 1}
+
+
+def _apply_opinion_delta(country_id: str, delta: int) -> None:
+    """Add delta to population_opinion, clamped to [0, 100]."""
+    con = _write_conn()
+    try:
+        con.execute(
+            "UPDATE countries "
+            "SET population_opinion = MAX(0, MIN(100, population_opinion + ?)) "
+            "WHERE server_id=? AND scenario_id=? AND country_id=?",
+            (delta, SERVER_ID, SCENARIO_ID, country_id),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
+def apply_hospital_opinion(country_id: str, province_count: int = 1) -> None:
+    """Apply +1.5 opinion per completed Hospital province. Called on building completion."""
+    if province_count <= 0:
+        return
+    delta = int(round(1.5 * province_count))
+    _apply_opinion_delta(country_id, delta)
 
 
 # ── Fuzzy research name lookup ────────────────────────────────────────────────

@@ -449,9 +449,9 @@ def get_config(building_type: str | BuildingType) -> BuildingConfig:
 
 BUILDING_CONSUMPTION: dict[BuildingType, dict[str, int]] = {
     BuildingType.TEXTILE_MILL:        {"cotton": 5},
-    BuildingType.CHEMICAL_PLANT:      {"oil": 3, "copper": 2},
-    BuildingType.POWDER_MILL:         {"coal": 6, "oil": 2},
-    BuildingType.ARMS_FACTORY:        {"iron": 10, "gunpowder": 5},
+    BuildingType.CHEMICAL_PLANT:      {"copper": 2, "oil": 2},
+    BuildingType.POWDER_MILL:         {"coal": 5, "oil": 5},
+    BuildingType.ARMS_FACTORY:        {"gunpowder": 5, "iron": 5},
     BuildingType.PHARMACEUTICAL_PLANT: {"chemicals": 2, "rubber": 2},
 }
 

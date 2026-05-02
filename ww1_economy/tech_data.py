@@ -178,6 +178,7 @@ REFORM_TREE: dict[str, ReformDef] = {
         name            = "Banking System",
         duration_months = 6,
         prerequisites   = (),
+        opinion_bonus   = 2,
     ),
 
     "central_banking_system": ReformDef(
@@ -194,7 +195,7 @@ REFORM_TREE: dict[str, ReformDef] = {
         name                   = "Civil Rights Framework",
         duration_months        = 6,
         prerequisites          = (),
-        opinion_bonus          = 4,
+        opinion_bonus          = 2,
         economy_efficiency_pct = -3.0,
     ),
 

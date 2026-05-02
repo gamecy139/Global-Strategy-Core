@@ -84,6 +84,7 @@ class DailyTickReport:
     countries:             dict[str, CountryDailyResult]   = field(default_factory=dict)
     tech_completions:      list[ResearchCompletionEvent]   = field(default_factory=list)
     reform_completions:    list[ReformCompletionEvent]     = field(default_factory=list)
+    building_completions:  list[dict]                      = field(default_factory=list)
 
     def summary(self) -> dict:
         return {
@@ -216,7 +217,7 @@ class TickSystem:
             raise ValueError("days_passed must be non-negative.")
 
         # 1. Process building construction completions.
-        self._buildings.process_completions(server_id, scenario_id, current_day)
+        completed_buildings = self._buildings.process_completions(server_id, scenario_id, current_day)
 
         # 2. Process technology research completions.
         tech_events: list[ResearchCompletionEvent] = []
@@ -233,11 +234,12 @@ class TickSystem:
             )
 
         report = DailyTickReport(
-            server_id         = server_id,
-            scenario_id       = scenario_id,
-            days_passed       = days_passed,
-            tech_completions  = tech_events,
-            reform_completions = reform_events,
+            server_id             = server_id,
+            scenario_id           = scenario_id,
+            days_passed           = days_passed,
+            tech_completions      = tech_events,
+            reform_completions    = reform_events,
+            building_completions  = completed_buildings,
         )
         if days_passed == 0:
             return report
@@ -296,23 +298,17 @@ class TickSystem:
         # 2. Production (treasury credited inline for gold/gems mines)
         production = self._production.run_monthly_production(server_id, scenario_id)
 
-        # 3. Refresh daily_base_income from production results
-        for cid, cp in production.by_country.items():
+        # 3. Refresh daily_base_income = base_income_floor + building income
+        all_countries = self._db.get_all_countries(server_id, scenario_id)
+        for crow in all_countries:
+            cid   = crow["country_id"]
+            floor = float(crow.get("base_income_floor") or 0.0)
+            cp    = production.by_country.get(cid)
+            bldg_income = float(cp.daily_income_total) if (cp and cp.buildings_processed > 0) else 0.0
             self._db.update_country_fields(
                 server_id, scenario_id, cid,
-                daily_base_income=float(cp.daily_income_total),
+                daily_base_income=floor + bldg_income,
             )
-        # Countries with zero active buildings: zero out
-        for crow in self._db.get_all_countries(server_id, scenario_id):
-            cid = crow["country_id"]
-            if cid not in production.by_country:
-                self._db.update_country_fields(
-                    server_id, scenario_id, cid, daily_base_income=0.0
-                )
-            elif production.by_country[cid].buildings_processed == 0:
-                self._db.update_country_fields(
-                    server_id, scenario_id, cid, daily_base_income=0.0
-                )
 
         # 4. Market
         market = self._market.update_market_monthly(
