@@ -8,17 +8,16 @@ import tempfile
 
 from lxml import etree
 
-from discord_bot.ww1_data import DB_PATH, SERVER_ID, SCENARIO_ID
+from discord_bot.ww1_data import DB_PATH, SCENARIO_ID
 
 SVG_PATH = "All Complete.svg"
 
-# Full viewBox covering all province content (mm units)
-# Discovered by sampling first-coord of every province path after scale(0.26458333)
-# X: 75–465, Y: 1–225  → add small padding
+# Full viewBox covering all province content (mm units, after scale(0.26458333))
 MAP_VIEWBOX = "65 -5 415 240"
 
 RSVG_CONVERT = "/nix/store/9gwwn0yb3zj0vr1rn6ix2bia57ahksry-librsvg-2.60.0/bin/rsvg-convert"
 
+# country_id → hex fill color
 COUNTRY_COLORS: dict[str, str] = {
     "germany":         "#4A90E2",
     "united_kingdom":  "#D0021B",
@@ -42,6 +41,54 @@ COUNTRY_COLORS: dict[str, str] = {
     "albania":         "#C0392B",
 }
 
+# country_id → human-readable display name
+COUNTRY_DISPLAY_NAMES: dict[str, str] = {
+    "germany":         "German Empire",
+    "united_kingdom":  "United Kingdom",
+    "france":          "France",
+    "russian_empire":  "Russian Empire",
+    "austrian_empire": "Austrian Empire",
+    "ottoman":         "Ottoman Empire",
+    "italy":           "Italy",
+    "spain":           "Spain",
+    "netherlands":     "Netherlands",
+    "belgium":         "Belgium",
+    "sweden":          "Sweden",
+    "denmark":         "Denmark",
+    "norway":          "Norway",
+    "portugal":        "Portugal",
+    "switzerland":     "Switzerland",
+    "greece":          "Greece",
+    "serbia":          "Serbia",
+    "bulgaria":        "Bulgaria",
+    "romania":         "Romania",
+    "albania":         "Albania",
+}
+
+# country_id → plain English color name
+COUNTRY_COLOR_NAMES: dict[str, str] = {
+    "germany":         "Blue",
+    "united_kingdom":  "Red",
+    "france":          "Teal",
+    "russian_empire":  "Purple",
+    "austrian_empire": "Orange",
+    "ottoman":         "Brown",
+    "italy":           "Green",
+    "spain":           "Violet",
+    "netherlands":     "Dark Green",
+    "belgium":         "Yellow",
+    "sweden":          "Dark Grey",
+    "denmark":         "Light Green",
+    "norway":          "Navy",
+    "portugal":        "Amber",
+    "switzerland":     "Crimson",
+    "greece":          "Sky Blue",
+    "serbia":          "Slate",
+    "bulgaria":        "Emerald",
+    "romania":         "Gold",
+    "albania":         "Dark Red",
+}
+
 DEFAULT_COLOR  = "#CCCCCC"
 INKSCAPE_NS    = "http://www.inkscape.org/namespaces/inkscape"
 LABEL_ATTR     = f"{{{INKSCAPE_NS}}}label"
@@ -53,14 +100,14 @@ def _normalize(s: str) -> str:
     return s.strip().lower().replace(" ", "")
 
 
-def _get_owner_map() -> dict[str, str]:
-    """Return {normalized_province_name: country_id} for every province."""
+def _get_owner_map(server_id: str) -> dict[str, str]:
+    """Return {normalized_province_name: country_id} for every province in this server."""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
         "SELECT province_name, owner_country FROM provinces "
         "WHERE server_id=? AND scenario_id=?",
-        (SERVER_ID, SCENARIO_ID),
+        (server_id, SCENARIO_ID),
     ).fetchall()
     conn.close()
     return {_normalize(r["province_name"]): r["owner_country"] for r in rows}
@@ -85,23 +132,25 @@ def _apply_fill(style: str, color: str) -> str:
     return style
 
 
-def render_map_png(output_width: int = 1400) -> bytes:
-    """Color every province by its current owner and return PNG bytes."""
-    owner_map = _get_owner_map()
+def render_map_png(output_width: int = 1400, server_id: str = "guild_demo") -> bytes:
+    """
+    Color every province by its current owner for the given server and return PNG bytes.
+    Provinces with no owner data are rendered in the default grey (#CCCCCC).
+    """
+    owner_map = _get_owner_map(server_id)
 
     parser = etree.XMLParser(remove_blank_text=False, recover=True)
     tree   = etree.parse(SVG_PATH, parser)
     root   = tree.getroot()
 
-    # Remove sodipodi:namedview (contains Inkscape page-color metadata that
-    # rsvg-convert may interpret as a white background rect)
+    # Remove sodipodi:namedview — contains Inkscape page-colour metadata that
+    # newer rsvg-convert treats as a white page background, washing out fills.
     for el in list(root):
         if "namedview" in el.tag:
             root.remove(el)
 
-    # Remove unlabeled paths — these are 1500+ text-label halo/glyph paths
-    # rendered as white near-opaque fills that sit on top of province fills
-    # and make all provinces appear white.
+    # Remove unlabeled paths — 1500+ text-glyph / halo paths whose near-white
+    # fills sit on top of province fills and make the map appear all-white.
     for el in list(root.iter()):
         if el.tag.split("}")[-1] != "path":
             continue
@@ -110,35 +159,28 @@ def render_map_png(output_width: int = 1400) -> bytes:
             if parent is not None:
                 parent.remove(el)
 
-    # Fix the viewBox so rsvg-convert renders the actual map area
+    # Fix the viewBox so rsvg-convert renders the actual map area.
     root.set("viewBox", MAP_VIEWBOX)
     root.set("width",  "415mm")
     root.set("height", "240mm")
 
-    colored = 0
     for elem in root.iter():
         label = (elem.get(LABEL_ATTR) or "").strip()
         if not label or label == "Layer 1":
             continue
 
         country_id = owner_map.get(_normalize(label))
-        if country_id is None:
-            color = DEFAULT_COLOR
-        else:
-            color = COUNTRY_COLORS.get(country_id, DEFAULT_COLOR)
+        color = COUNTRY_COLORS.get(country_id, DEFAULT_COLOR) if country_id else DEFAULT_COLOR
 
-        style = elem.get("style", "")
+        style     = elem.get("style", "")
         new_style = _apply_fill(style, color)
         if new_style != style:
             elem.set("style", new_style)
         elif elem.get("fill") is not None:
             elem.set("fill", color)
 
-        colored += 1
-
     svg_bytes = etree.tostring(root, xml_declaration=True, encoding="UTF-8")
 
-    # Write to temp file and convert with rsvg-convert (handles Inkscape SVGs)
     with tempfile.NamedTemporaryFile(suffix=".svg", delete=False) as svg_tmp:
         svg_tmp.write(svg_bytes)
         svg_path = svg_tmp.name
