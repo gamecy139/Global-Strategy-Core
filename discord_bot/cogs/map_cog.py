@@ -13,6 +13,7 @@ from discord_bot.map_renderer import (
     COUNTRY_DISPLAY_NAMES,
     DEFAULT_COLOR,
 )
+from discord_bot.ww1_data import SERVER_ID
 
 log = logging.getLogger(__name__)
 
@@ -37,13 +38,11 @@ class MapCog(commands.Cog, name="Map"):
         """Render the current political map coloured by country ownership."""
         status = await ctx.send("🗺️  Generating map… this may take a few seconds.")
 
-        guild_id = str(ctx.guild.id) if ctx.guild else "guild_demo"
-
         try:
             from discord_bot.map_renderer import render_map_png
             loop      = asyncio.get_event_loop()
             png_bytes = await loop.run_in_executor(
-                None, lambda: render_map_png(server_id=guild_id)
+                None, lambda: render_map_png(server_id=SERVER_ID)
             )
         except Exception as exc:
             log.exception("Map render failed")

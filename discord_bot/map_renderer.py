@@ -9,7 +9,7 @@ import tempfile
 
 from lxml import etree
 
-from discord_bot.ww1_data import DB_PATH, SCENARIO_ID
+from discord_bot.ww1_data import DB_PATH, SCENARIO_ID, SERVER_ID
 
 log = logging.getLogger(__name__)
 
@@ -137,7 +137,7 @@ def _get_province_dict(server_id: str) -> dict[str, dict]:
     return province_dict
 
 
-def render_map_png(output_width: int = 1400, server_id: str = "guild_demo") -> bytes:
+def render_map_png(output_width: int = 1400, server_id: str = SERVER_ID) -> bytes:
     """
     Color every province in the SVG by its current owner and return PNG bytes.
 
