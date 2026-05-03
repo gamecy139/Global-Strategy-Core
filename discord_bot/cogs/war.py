@@ -69,11 +69,13 @@ def _build_name_map() -> dict[str, str]:
 class WarStatusView(discord.ui.View):
     """Buttons shown with rp war — one war at a time."""
 
-    def __init__(self, war_id: str, country_id: str, guild_id: str) -> None:
-        super().__init__(timeout=120)
+    def __init__(self, war_id: str, country_id: str, guild_id: str,
+                 war_label: str = "") -> None:
+        super().__init__(timeout=300)
         self.war_id     = war_id
         self.country_id = country_id
         self.guild_id   = guild_id
+        self.war_label  = war_label
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         user_cid = game_state.get_user_country(
@@ -100,7 +102,8 @@ class WarStatusView(discord.ui.View):
         gd   = game_state.get_game_day(self.guild_id)
         em   = embeds.war_status_embed(
             details["war"], details["participants"],
-            details["occupations"], date, nm, current_game_day=gd
+            details["occupations"], date, nm,
+            current_game_day=gd, war_label=self.war_label,
         )
         if interaction.response.is_done():
             await interaction.message.edit(embed=em, view=self)
@@ -1157,39 +1160,54 @@ class WarCog(commands.Cog, name="War"):
         date = game_state.game_date_str(gd)
 
         wars = get_active_wars_for_country(cid)
+        nm   = _build_name_map()
+
         if not wars:
-            em = embeds.war_list_embed([], my_country["country_name"], date)
+            em = embeds.war_list_embed([], my_country["country_name"], date, name_map=nm)
             return await ctx.send(embed=em)
 
         target_war_id: str | None = None
+        war_label:     str        = ""
         if war_id:
-            for w in wars:
-                if w["war_id"].startswith(war_id) or w["war_id"] == war_id:
-                    target_war_id = w["war_id"]
-                    break
+            # Try numeric selector first: rp war 1 → War 1
+            try:
+                war_num = int(war_id)
+                if 1 <= war_num <= len(wars):
+                    target_war_id = wars[war_num - 1]["war_id"]
+                    war_label     = f"War {war_num}"
+            except ValueError:
+                pass
+            # Fall back to UUID prefix match
+            if target_war_id is None:
+                for i, w in enumerate(wars, 1):
+                    if w["war_id"].startswith(war_id) or w["war_id"] == war_id:
+                        target_war_id = w["war_id"]
+                        war_label     = f"War {i}"
+                        break
             if target_war_id is None:
                 return await ctx.send(embed=embeds.war_action_result_embed(
                     "War Not Found",
-                    f"No active war with ID starting `{war_id}` found for your country.",
+                    f"No active war matching `{war_id}` found for your country.",
                     False,
                 ))
         else:
             if len(wars) > 1:
-                em = embeds.war_list_embed(wars, my_country["country_name"], date)
-                em.description += "\n\n*Use `rp war <war_id_prefix>` to view a specific war.*"
+                em = embeds.war_list_embed(wars, my_country["country_name"], date, name_map=nm)
+                em.description += "\n\n*Use `rp war <number>` to view a specific war (e.g. `rp war 1`).*"
                 return await ctx.send(embed=em)
             target_war_id = wars[0]["war_id"]
+            war_label     = "War 1"
 
         details = get_war_details(target_war_id)
         if details is None:
             return await ctx.send("War data not found.")
 
-        nm = _build_name_map()
         em = embeds.war_status_embed(
             details["war"], details["participants"],
-            details["occupations"], date, nm, current_game_day=gd
+            details["occupations"], date, nm,
+            current_game_day=gd, war_label=war_label,
         )
-        view = WarStatusView(target_war_id, cid, str(ctx.guild.id))
+        view = WarStatusView(target_war_id, cid, str(ctx.guild.id), war_label=war_label)
         await ctx.send(embed=em, view=view)
 
     # ── call_allies ───────────────────────────────────────────────────────────

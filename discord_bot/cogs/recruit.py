@@ -66,7 +66,6 @@ class SummaryView(SecureView):
         self.treasury      = treasury
         self.penalty       = penalty
         self.guild_id      = guild_id
-        self.user_id       = user_id
         self.game_day      = game_day
         self.current_month = current_month
 
@@ -238,7 +237,6 @@ class RecruitView(SecureView):
         self.country_id    = country_id
         self.country_name  = country_name
         self.guild_id      = guild_id
-        self.user_id       = user_id
         self.game_day      = game_day
         self.current_month = current_month
         self.quantities: dict[str, int] = {}

@@ -1459,6 +1459,7 @@ def war_status_embed(
     date_str: str,
     name_map: dict[str, str],   # country_id → country_name
     current_game_day: int = 0,
+    war_label: str = "",
 ) -> discord.Embed:
     att_id = war["attacker"]
     def_id = war["defender"]
@@ -1532,12 +1533,8 @@ def war_status_embed(
     elif def_score <= 15:
         desc_lines.append(f"🏳️  **{def_name}** may surrender (score ≤ 15).")
 
-    e = _base(
-        f"War Status  •  {date_str}",
-        "\n".join(desc_lines),
-        COL_RED,
-    )
-    e.add_field(name="War ID", value=f"`{war['war_id']}`", inline=True)
+    title = f"{war_label}  •  War Status  •  {date_str}" if war_label else f"War Status  •  {date_str}"
+    e = _base(title, "\n".join(desc_lines), COL_RED)
     e.add_field(name="Status", value=war.get("status", "active").title(), inline=True)
     return e
 
@@ -1546,6 +1543,7 @@ def war_list_embed(
     wars: list[dict],
     country_name: str,
     date_str: str,
+    name_map: dict | None = None,
 ) -> discord.Embed:
     if not wars:
         return _base(
@@ -1553,12 +1551,15 @@ def war_list_embed(
             "Your country is at peace. Use `rp declare_war <country>` to start a war.",
             COL_GREY,
         )
+    nm = name_map or {}
     lines = []
-    for w in wars:
+    for i, w in enumerate(wars, 1):
         att_score = float(w.get("war_score_attacker") or 50)
         def_score = float(w.get("war_score_defender") or 50)
+        att_name  = nm.get(w["attacker"], w["attacker"])
+        def_name  = nm.get(w["defender"], w["defender"])
         lines.append(
-            f"**`{w['war_id'][:8]}…`**  {w['attacker']} vs {w['defender']}"
+            f"**War {i}** — {att_name} vs {def_name}"
             f"  |  Score: {att_score:.0f}–{def_score:.0f}"
         )
     return _base(

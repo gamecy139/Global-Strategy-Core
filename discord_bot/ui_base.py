@@ -6,7 +6,7 @@ import discord
 class SecureView(discord.ui.View):
     """Base view that rejects interactions from anyone other than the invoking user."""
 
-    def __init__(self, user_id: int, timeout: float = 120):
+    def __init__(self, user_id: int, timeout: float = 300):
         super().__init__(timeout=timeout)
         self.user_id = user_id
 
