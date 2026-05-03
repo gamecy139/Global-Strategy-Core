@@ -15,6 +15,7 @@ import discord
 from discord.ext import commands
 
 from discord_bot import embeds, game_state
+from discord_bot.ui_base import SecureView
 from discord_bot.ww1_data import (
     get_country_by_id,
     get_provinces,
@@ -37,7 +38,7 @@ SLOT_LABELS: dict[str, str] = {
 
 # ── Step 4: Summary — Start / Cancel ─────────────────────────────────────────
 
-class SummaryView(discord.ui.View):
+class SummaryView(SecureView):
     def __init__(
         self,
         country:       dict,
@@ -54,7 +55,7 @@ class SummaryView(discord.ui.View):
         game_day:      int,
         current_month: int,
     ) -> None:
-        super().__init__(timeout=180)
+        super().__init__(user_id=int(user_id), timeout=180)
         self.country       = country
         self.province_id   = province_id
         self.province_name = province_name
@@ -73,12 +74,6 @@ class SummaryView(discord.ui.View):
     async def start_btn(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
-        if str(interaction.user.id) != self.user_id:
-            await interaction.response.send_message(
-                "This isn't your recruitment session.", ephemeral=True
-            )
-            return
-
         await interaction.response.defer()
 
         actual = game_state.get_user_country(self.guild_id, str(interaction.user.id))
@@ -120,11 +115,6 @@ class SummaryView(discord.ui.View):
     async def cancel_btn(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
-        if str(interaction.user.id) != self.user_id:
-            await interaction.response.send_message(
-                "This isn't your recruitment session.", ephemeral=True
-            )
-            return
         await interaction.response.edit_message(
             embed=embeds.select_error_embed("Recruitment cancelled."),
             view=None,
@@ -160,12 +150,6 @@ class RecruitUnitSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         view = self.parent_view
-
-        if str(interaction.user.id) != view.user_id:
-            await interaction.response.send_message(
-                "This isn't your recruitment session.", ephemeral=True
-            )
-            return
 
         await interaction.response.defer()
 
@@ -234,7 +218,7 @@ class RecruitUnitSelect(discord.ui.Select):
 
 # ── Step 2: Recruitment view (select + continue button) ───────────────────────
 
-class RecruitView(discord.ui.View):
+class RecruitView(SecureView):
     def __init__(
         self,
         slot_units:    dict,
@@ -247,7 +231,7 @@ class RecruitView(discord.ui.View):
         game_day:      int,
         current_month: int,
     ) -> None:
-        super().__init__(timeout=300)
+        super().__init__(user_id=int(user_id), timeout=300)
         self.slot_units    = slot_units
         self.province_id   = province_id
         self.province_name = province_name
@@ -265,12 +249,6 @@ class RecruitView(discord.ui.View):
     async def continue_btn(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
-        if str(interaction.user.id) != self.user_id:
-            await interaction.response.send_message(
-                "This isn't your recruitment session.", ephemeral=True
-            )
-            return
-
         if not self.quantities:
             await interaction.response.send_message(
                 "Select at least one unit category and enter a quantity first.",
@@ -379,12 +357,6 @@ class ProvinceSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        if str(interaction.user.id) != self.user_id:
-            await interaction.response.send_message(
-                "This isn't your recruitment session.", ephemeral=True
-            )
-            return
-
         await interaction.response.defer()
 
         province      = self._province_map[self.values[0]]
@@ -421,7 +393,7 @@ class ProvinceSelect(discord.ui.Select):
         )
 
 
-class ProvinceView(discord.ui.View):
+class ProvinceView(SecureView):
     def __init__(
         self,
         provinces:     list[dict],
@@ -432,7 +404,7 @@ class ProvinceView(discord.ui.View):
         game_day:      int,
         current_month: int,
     ) -> None:
-        super().__init__(timeout=120)
+        super().__init__(user_id=int(user_id), timeout=120)
         self.add_item(ProvinceSelect(
             provinces, country_id, country_name,
             guild_id, user_id, game_day, current_month,

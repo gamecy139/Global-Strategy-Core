@@ -8,6 +8,7 @@ import discord
 from discord.ext import commands
 
 from discord_bot import embeds, game_state
+from discord_bot.ui_base import SecureView
 from discord_bot.ww1_data import (
     find_country, get_country_by_id, get_provinces,
     get_storage, get_display_storage,
@@ -74,9 +75,9 @@ BUILDINGS_PAGES = [
 ]
 
 
-class BuildingsView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=120)
+class BuildingsView(SecureView):
+    def __init__(self, user_id: int = 0):
+        super().__init__(user_id=user_id, timeout=120)
         self.page = 0
         self._update_buttons()
 
@@ -168,14 +169,14 @@ class ProvinceSelect(discord.ui.Select):
             building  = building,
             provinces = selected_ps,
             guild_id  = str(interaction.guild_id),
-            user_id   = str(interaction.user.id),
+            user_id   = interaction.user.id,
         )
         await interaction.response.edit_message(embed=confirm_embed, view=confirm_view)
 
 
-class ConstructSelectView(discord.ui.View):
-    def __init__(self, building: dict, provinces: list[dict]):
-        super().__init__(timeout=120)
+class ConstructSelectView(SecureView):
+    def __init__(self, building: dict, provinces: list[dict], user_id: int = 0):
+        super().__init__(user_id=user_id, timeout=120)
         self.add_item(ProvinceSelect(building, provinces))
 
     async def on_timeout(self):
@@ -185,14 +186,13 @@ class ConstructSelectView(discord.ui.View):
 
 # ── Construct: confirmation buttons ───────────────────────────────────────────
 
-class ConstructConfirmView(discord.ui.View):
+class ConstructConfirmView(SecureView):
     def __init__(self, building: dict, provinces: list[dict],
-                 guild_id: str, user_id: str):
-        super().__init__(timeout=120)
+                 guild_id: str, user_id: int = 0):
+        super().__init__(user_id=user_id, timeout=120)
         self.building  = building
         self.provinces = provinces
         self.guild_id  = guild_id
-        self.user_id   = user_id
 
     @discord.ui.button(label="✅  Construct", style=discord.ButtonStyle.success)
     async def construct_btn(self, interaction: discord.Interaction,
@@ -200,7 +200,7 @@ class ConstructConfirmView(discord.ui.View):
         await interaction.response.defer()
 
         guild_id   = self.guild_id
-        country_id = game_state.get_user_country(guild_id, self.user_id)
+        country_id = game_state.get_user_country(guild_id, str(self.user_id))
         if country_id is None:
             await interaction.edit_original_response(embed=embeds.no_country_embed(), view=None)
             return
@@ -382,6 +382,7 @@ class TechCategorySelect(discord.ui.Select):
             country_name = self.country_name,
             category     = category,
             items        = items,
+            user_id      = self.view.user_id,
         )
         await interaction.edit_original_response(
             embed=page_view._current_embed(),
@@ -389,9 +390,9 @@ class TechCategorySelect(discord.ui.Select):
         )
 
 
-class TechMainView(discord.ui.View):
-    def __init__(self, country_id: str, guild_id: str, country_name: str):
-        super().__init__(timeout=180)
+class TechMainView(SecureView):
+    def __init__(self, country_id: str, guild_id: str, country_name: str, user_id: int = 0):
+        super().__init__(user_id=user_id, timeout=180)
         self.add_item(TechCategorySelect(country_id, guild_id, country_name))
 
     async def on_timeout(self):
@@ -399,10 +400,10 @@ class TechMainView(discord.ui.View):
             item.disabled = True
 
 
-class TechTreeView(discord.ui.View):
+class TechTreeView(SecureView):
     def __init__(self, country_id: str, guild_id: str, country_name: str,
-                 category: str, items: list[dict]):
-        super().__init__(timeout=180)
+                 category: str, items: list[dict], user_id: int = 0):
+        super().__init__(user_id=user_id, timeout=180)
         self.country_id   = country_id
         self.guild_id     = guild_id
         self.country_name = country_name
@@ -547,7 +548,7 @@ class TaxSelect(discord.ui.Select):
             )
             return
 
-        new_view = TaxationView(tax_key, country_id, guild_id, self.current_month)
+        new_view = TaxationView(tax_key, country_id, guild_id, self.current_month, user_id=self.view.user_id)
         await interaction.edit_original_response(
             embed=embeds.taxation_changed_embed(
                 tier       = new_tier,
@@ -558,15 +559,16 @@ class TaxSelect(discord.ui.Select):
         )
 
 
-class TaxationView(discord.ui.View):
+class TaxationView(SecureView):
     def __init__(
         self,
         current_tax_key: str,
         country_id:      str,
         guild_id:        str,
         current_month:   int,
+        user_id:         int = 0,
     ):
-        super().__init__(timeout=120)
+        super().__init__(user_id=user_id, timeout=120)
         self.add_item(TaxSelect(current_tax_key, country_id, guild_id, current_month))
 
     async def on_timeout(self):
@@ -635,9 +637,9 @@ class ResourceSelect(discord.ui.Select):
         await interaction.response.send_modal(modal)
 
 
-class GlobalMarketView(discord.ui.View):
-    def __init__(self, market_rows: list[dict], country_id: str, guild_id: str):
-        super().__init__(timeout=120)
+class GlobalMarketView(SecureView):
+    def __init__(self, market_rows: list[dict], country_id: str, guild_id: str, user_id: int = 0):
+        super().__init__(user_id=user_id, timeout=120)
         self.add_item(ResourceSelect(market_rows, country_id, guild_id))
 
     async def on_timeout(self):
@@ -695,6 +697,7 @@ class QuantityModal(discord.ui.Modal, title="Enter Quantity"):
             total_cost = total_cost,
             country_id = self.country_id,
             guild_id   = self.guild_id,
+            user_id    = interaction.user.id,
         )
         await interaction.response.send_message(
             embed=embeds.market_buy_confirm_embed(
@@ -710,11 +713,11 @@ class QuantityModal(discord.ui.Modal, title="Enter Quantity"):
 
 # ── Global Market — confirm / cancel ─────────────────────────────────────────
 
-class MarketConfirmView(discord.ui.View):
+class MarketConfirmView(SecureView):
     def __init__(self, resource: str, quantity: int,
                  unit_price: float, total_cost: float,
-                 country_id: str, guild_id: str):
-        super().__init__(timeout=90)
+                 country_id: str, guild_id: str, user_id: int = 0):
+        super().__init__(user_id=user_id, timeout=90)
         self.resource   = resource
         self.quantity   = quantity
         self.unit_price = unit_price
@@ -870,7 +873,7 @@ class EconomyCog(commands.Cog, name="Economy"):
         if not game_state.is_game_running(guild_id):
             await ctx.send(embed=embeds.no_game_embed())
             return
-        view = BuildingsView()
+        view = BuildingsView(user_id=ctx.author.id)
         await ctx.send(embed=view._current_embed(), view=view)
 
     # ── rp construct <building> ───────────────────────────────────────────────
@@ -934,7 +937,7 @@ class EconomyCog(commands.Cog, name="Economy"):
             return
 
         info_embed = embeds.construct_info_embed(building, country["country_name"], compatible)
-        view       = ConstructSelectView(building, compatible if compatible else provinces)
+        view       = ConstructSelectView(building, compatible if compatible else provinces, user_id=ctx.author.id)
         await ctx.send(embed=info_embed, view=view)
 
     # ── rp technology ─────────────────────────────────────────────────────────
@@ -959,7 +962,7 @@ class EconomyCog(commands.Cog, name="Economy"):
         speed    = get_research_speed(country_id)
         active   = get_active_research_info(country_id, game_day)
 
-        view = TechMainView(country_id, guild_id, country["country_name"])
+        view = TechMainView(country_id, guild_id, country["country_name"], user_id=ctx.author.id)
         await ctx.send(
             embed=embeds.technology_main_embed(
                 country_name    = country["country_name"],
@@ -1357,7 +1360,7 @@ class EconomyCog(commands.Cog, name="Economy"):
                 current_opinion    = opinion,
                 current_efficiency = efficiency,
             ),
-            view=TaxationView(current_tax_key, country_id, guild_id, current_month),
+            view=TaxationView(current_tax_key, country_id, guild_id, current_month, user_id=ctx.author.id),
         )
 
     # ── rp gm / rp global_market ──────────────────────────────────────────────
@@ -1377,7 +1380,7 @@ class EconomyCog(commands.Cog, name="Economy"):
             return
 
         market_rows = get_market_snapshot()
-        view        = GlobalMarketView(market_rows, country_id, guild_id)
+        view        = GlobalMarketView(market_rows, country_id, guild_id, user_id=ctx.author.id)
         await ctx.send(
             embed=embeds.global_market_embed(market_rows),
             view=view,

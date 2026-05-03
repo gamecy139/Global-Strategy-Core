@@ -7,6 +7,7 @@ import discord
 from discord.ext import commands
 
 from discord_bot import embeds, game_state
+from discord_bot.ui_base import SecureView
 from discord_bot.ww1_data import (
     find_country, get_countries, get_country_by_id,
     get_provinces, get_buildings_with_status, get_army_summary,
@@ -59,9 +60,9 @@ class ScenarioSelect(discord.ui.Select):
         )
 
 
-class ScenarioView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=120)
+class ScenarioView(SecureView):
+    def __init__(self, user_id: int = 0):
+        super().__init__(user_id=user_id, timeout=120)
         self.add_item(ScenarioSelect())
 
     async def on_timeout(self):
@@ -71,9 +72,9 @@ class ScenarioView(discord.ui.View):
 
 # ── Countries pagination ──────────────────────────────────────────────────────
 
-class CountriesView(discord.ui.View):
-    def __init__(self, countries: list[dict], assignments: dict[str, str]):
-        super().__init__(timeout=90)
+class CountriesView(SecureView):
+    def __init__(self, countries: list[dict], assignments: dict[str, str], user_id: int = 0):
+        super().__init__(user_id=user_id, timeout=90)
         self.countries   = countries
         self.assignments = assignments
         self.page        = 1
@@ -136,9 +137,9 @@ class SpeedSelect(discord.ui.Select):
         )
 
 
-class SpeedView(discord.ui.View):
-    def __init__(self, current_value: str):
-        super().__init__(timeout=90)
+class SpeedView(SecureView):
+    def __init__(self, current_value: str, user_id: int = 0):
+        super().__init__(user_id=user_id, timeout=90)
         self.add_item(SpeedSelect(current_value))
 
     async def on_timeout(self):
@@ -148,9 +149,9 @@ class SpeedView(discord.ui.View):
 
 # ── Clear game: confirmation view ─────────────────────────────────────────────
 
-class ClearConfirmView(discord.ui.View):
-    def __init__(self, guild_id: str):
-        super().__init__(timeout=60)
+class ClearConfirmView(SecureView):
+    def __init__(self, guild_id: str, user_id: int = 0):
+        super().__init__(user_id=user_id, timeout=60)
         self.guild_id = guild_id
 
     @discord.ui.button(label="✅  Yes, Reset", style=discord.ButtonStyle.danger)
@@ -240,9 +241,9 @@ class CountrySelect(discord.ui.Select):
         await interaction.edit_original_response(embed=embed, view=self.view)
 
 
-class CountryView(discord.ui.View):
-    def __init__(self, country: dict, owner_name: str, guild_id: str):
-        super().__init__(timeout=180)
+class CountryView(SecureView):
+    def __init__(self, country: dict, owner_name: str, guild_id: str, user_id: int = 0):
+        super().__init__(user_id=user_id, timeout=180)
         self.add_item(CountrySelect(country, owner_name, guild_id))
 
     async def on_timeout(self):
@@ -272,7 +273,7 @@ class GameCog(commands.Cog, name="Game"):
             label     = label_map.get(session["scenario_id"], session["scenario_id"].upper())
             await ctx.send(embed=embeds.game_already_started_embed(label))
             return
-        view = ScenarioView()
+        view = ScenarioView(user_id=ctx.author.id)
         await ctx.send(embed=embeds.start_setup_embed(), view=view)
 
     @commands.command(name="countries")
@@ -283,7 +284,7 @@ class GameCog(commands.Cog, name="Game"):
             return
         countries   = get_countries()
         assignments = game_state.get_assignments(guild_id)
-        view        = CountriesView(countries, assignments)
+        view        = CountriesView(countries, assignments, user_id=ctx.author.id)
         await ctx.send(
             embed=embeds.countries_embed(
                 countries[:COUNTRIES_PER_PAGE], assignments,
@@ -330,7 +331,7 @@ class GameCog(commands.Cog, name="Game"):
             await ctx.send(embed=embeds.no_game_embed())
             return
         current = game_state.get_speed(guild_id)
-        view    = SpeedView(current)
+        view    = SpeedView(current, user_id=ctx.author.id)
         await ctx.send(embed=embeds.speed_embed(current, game_state.SPEED_OPTIONS), view=view)
 
     @commands.command(name="my_country", aliases=["mc"])
@@ -351,7 +352,7 @@ class GameCog(commands.Cog, name="Game"):
             ))
             return
         date = game_state.get_game_date(guild_id)
-        view = CountryView(country, ctx.author.display_name, guild_id)
+        view = CountryView(country, ctx.author.display_name, guild_id, user_id=ctx.author.id)
         await ctx.send(
             embed=embeds.my_country_overview_embed(country, ctx.author.display_name, date),
             view=view,
@@ -364,7 +365,7 @@ class GameCog(commands.Cog, name="Game"):
             await ctx.send(embed=embeds.not_authorised_embed("rp clear"))
             return
         guild_id = str(ctx.guild.id)
-        view     = ClearConfirmView(guild_id)
+        view     = ClearConfirmView(guild_id, user_id=ctx.author.id)
         await ctx.send(embed=embeds.clear_confirm_embed(), view=view)
 
 

@@ -7,6 +7,7 @@ import discord
 from discord.ext import commands
 
 from discord_bot import embeds, game_state
+from discord_bot.ui_base import SecureView
 from discord_bot.ww1_data import (
     get_countries,
     get_country_by_id,
@@ -193,15 +194,16 @@ class CountrySelect(discord.ui.Select):
         )
 
 
-class EditDiplomacyView(discord.ui.View):
+class EditDiplomacyView(SecureView):
     def __init__(
         self,
         guild_id:        str,
         my_country_id:   str,
         my_country_name: str,
         countries:       list[dict],
+        user_id:         int = 0,
     ):
-        super().__init__(timeout=120)
+        super().__init__(user_id=user_id, timeout=120)
         self.guild_id        = guild_id
         self.my_country_id   = my_country_id
         self.my_country_name = my_country_name
@@ -274,14 +276,15 @@ class CheckCountrySelect(discord.ui.Select):
         await interaction.response.edit_message(embed=detail_embed, view=view)
 
 
-class CheckDiplomacyView(discord.ui.View):
+class CheckDiplomacyView(SecureView):
     def __init__(
         self,
         my_country_id:   str,
         my_country_name: str,
         countries:       list[dict],
+        user_id:         int = 0,
     ):
-        super().__init__(timeout=180)
+        super().__init__(user_id=user_id, timeout=180)
         self.my_country_id   = my_country_id
         self.my_country_name = my_country_name
         self.countries       = countries
@@ -322,7 +325,7 @@ class DiplomacyCog(commands.Cog):
             return
 
         countries = get_countries()
-        view      = EditDiplomacyView(guild_id, country_id, country["country_name"], countries)
+        view      = EditDiplomacyView(guild_id, country_id, country["country_name"], countries, user_id=ctx.author.id)
         await ctx.send(
             embed=embeds.diplo_main_embed(country["country_name"]),
             view=view,
@@ -366,7 +369,7 @@ class DiplomacyCog(commands.Cog):
             wars=overview["wars"],
             name_map=nm,
         )
-        view = CheckDiplomacyView(country_id, country["country_name"], countries)
+        view = CheckDiplomacyView(country_id, country["country_name"], countries, user_id=ctx.author.id)
         await ctx.send(embed=embed, view=view)
 
 

@@ -8,6 +8,7 @@ import discord
 from discord.ext import commands
 
 from discord_bot import embeds, game_state
+from discord_bot.ui_base import SecureView
 from discord_bot.ww1_data import (
     find_country,
     get_country_by_id,
@@ -573,12 +574,13 @@ class NonCoreSelect(discord.ui.Select):
         await interaction.response.edit_message(embed=em, view=view)
 
 
-class NonCoreView(discord.ui.View):
+class NonCoreView(SecureView):
     def __init__(
         self, country_id: str, country_name: str,
         provinces: list[dict], guild_id: str,
+        user_id: int = 0,
     ) -> None:
-        super().__init__(timeout=120)
+        super().__init__(user_id=user_id, timeout=120)
         self.country_id   = country_id
         self.country_name = country_name
         self.provinces    = provinces
@@ -692,12 +694,13 @@ class ReligionSelect(discord.ui.Select):
         await interaction.response.edit_message(embed=em, view=view)
 
 
-class ReligionView(discord.ui.View):
+class ReligionView(SecureView):
     def __init__(
         self, country_id: str, country_name: str, country_religion: str,
         provinces: list[dict], guild_id: str,
+        user_id: int = 0,
     ) -> None:
-        super().__init__(timeout=120)
+        super().__init__(user_id=user_id, timeout=120)
         self.country_id       = country_id
         self.country_name     = country_name
         self.country_religion = country_religion
@@ -822,10 +825,11 @@ class WarSelectForAlly(discord.ui.Select):
         await view._update_message(interaction)
 
 
-class CallAlliesView(discord.ui.View):
+class CallAlliesView(SecureView):
     def __init__(self, country_id: str, allies: list[str],
-                 wars: list[dict], guild_id: str) -> None:
-        super().__init__(timeout=120)
+                 wars: list[dict], guild_id: str,
+                 user_id: int = 0) -> None:
+        super().__init__(user_id=user_id, timeout=120)
         self.country_id      = country_id
         self.allies          = allies
         self.wars            = wars
@@ -972,7 +976,7 @@ class ProvinceSelectMenu(discord.ui.Select):
         await view._update_message(interaction)
 
 
-class MoveUnitView(discord.ui.View):
+class MoveUnitView(SecureView):
     def __init__(
         self,
         country_id: str,
@@ -980,8 +984,9 @@ class MoveUnitView(discord.ui.View):
         provinces: list[dict],
         guild_id: str,
         enemy_country_ids: list[str],
+        user_id: int = 0,
     ) -> None:
-        super().__init__(timeout=120)
+        super().__init__(user_id=user_id, timeout=120)
         self.country_id              = country_id
         self.armies                  = armies
         self.provinces               = provinces
@@ -1214,7 +1219,7 @@ class WarCog(commands.Cog, name="War"):
                 False,
             ))
 
-        view = CallAlliesView(cid, allies, wars, str(ctx.guild.id))
+        view = CallAlliesView(cid, allies, wars, str(ctx.guild.id), user_id=ctx.author.id)
         em   = embeds.call_allies_embed(my_country["country_name"], allies, date)
         await ctx.send(embed=em, view=view)
 
@@ -1250,7 +1255,7 @@ class WarCog(commands.Cog, name="War"):
                 enemy_cids.append(opp)
 
         provinces = get_all_provinces_list(cid, enemy_cids)
-        view = MoveUnitView(cid, armies, provinces, str(ctx.guild.id), enemy_cids)
+        view = MoveUnitView(cid, armies, provinces, str(ctx.guild.id), enemy_cids, user_id=ctx.author.id)
         em   = embeds.move_army_embed(_country_name(cid), armies, date)
         await ctx.send(embed=em, view=view)
 
@@ -1290,7 +1295,7 @@ class WarCog(commands.Cog, name="War"):
         if not provinces:
             return await ctx.send(embed=em)
 
-        view = NonCoreView(cid, cname, provinces, str(ctx.guild.id))
+        view = NonCoreView(cid, cname, provinces, str(ctx.guild.id), user_id=ctx.author.id)
         await ctx.send(embed=em, view=view)
 
     # ── diff_religion ─────────────────────────────────────────────────────────
@@ -1324,7 +1329,7 @@ class WarCog(commands.Cog, name="War"):
         if not provinces:
             return await ctx.send(embed=em)
 
-        view = ReligionView(cid, cname, crel, provinces, str(ctx.guild.id))
+        view = ReligionView(cid, cname, crel, provinces, str(ctx.guild.id), user_id=ctx.author.id)
         await ctx.send(embed=em, view=view)
 
 
