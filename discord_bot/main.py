@@ -15,6 +15,7 @@ import discord
 from discord.ext import commands
 
 from discord_bot import game_state
+from discord_bot.ww1_data import set_server_context
 
 logging.basicConfig(
     level=logging.INFO,
@@ -76,6 +77,18 @@ def _remove_pid_file() -> None:
 
 INTENTS = discord.Intents.default()
 INTENTS.message_content = True
+
+
+_orig_view_scheduled_task = discord.ui.View._scheduled_task
+
+
+async def _view_task_with_context(self, item, interaction: discord.Interaction):
+    if interaction.guild_id:
+        set_server_context(str(interaction.guild_id))
+    return await _orig_view_scheduled_task(self, item, interaction)
+
+
+discord.ui.View._scheduled_task = _view_task_with_context
 
 
 class RoleplayBot(commands.Bot):
@@ -145,12 +158,18 @@ class RoleplayBot(commands.Bot):
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
+async def _before_any_command(ctx: commands.Context):
+    if ctx.guild:
+        set_server_context(str(ctx.guild.id))
+
+
 async def main():
     if not TOKEN:
         log.error("DISCORD_TOKEN is not set. Add it to Replit Secrets.")
         return
 
     bot = RoleplayBot()
+    bot.before_invoke(_before_any_command)
     async with bot:
         await bot.start(TOKEN)
 

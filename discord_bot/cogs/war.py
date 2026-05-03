@@ -78,6 +78,9 @@ class WarStatusView(discord.ui.View):
         self.war_label  = war_label
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.guild_id:
+            from discord_bot.ww1_data import set_server_context
+            set_server_context(str(interaction.guild_id))
         user_cid = game_state.get_user_country(
             str(interaction.guild.id), str(interaction.user.id)
         )
@@ -273,6 +276,9 @@ class VictoryDecisionView(discord.ui.View):
         self._rebuild_items()
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.guild_id:
+            from discord_bot.ww1_data import set_server_context
+            set_server_context(str(interaction.guild_id))
         user_cid = game_state.get_user_country(
             str(interaction.guild.id), str(interaction.user.id)
         )

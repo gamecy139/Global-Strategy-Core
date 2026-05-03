@@ -11,6 +11,7 @@ from discord_bot.ui_base import SecureView
 from discord_bot.ww1_data import (
     find_country, get_countries, get_country_by_id,
     get_provinces, get_buildings_with_status, get_army_summary,
+    ensure_guild_seeded,
 )
 
 COUNTRIES_PER_PAGE = 9
@@ -50,6 +51,7 @@ class ScenarioSelect(discord.ui.Select):
         guild_id   = str(interaction.guild_id)
         channel_id = str(interaction.channel_id)
         scenario   = self.values[0]
+        ensure_guild_seeded(guild_id)
         game_state.start_game(guild_id, channel_id, scenario)
         label_map  = {"ww1": "World War 1 (1910)"}
         label      = label_map.get(scenario, scenario.upper())

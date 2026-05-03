@@ -239,21 +239,21 @@ class CheckCountrySelect(discord.ui.Select):
         relation   = get_relation_value(my_id, target_id)
         rival_us   = is_rival(my_id, target_id)  # we or they declared rivalry
         # directional check — did WE initiate?
-        from discord_bot.ww1_data import _conn, SERVER_ID, SCENARIO_ID
+        from discord_bot.ww1_data import _conn, _sid, _scid
         with _conn() as con:
             we_rivaled  = con.execute(
                 "SELECT 1 FROM rivals WHERE server_id=? AND scenario_id=? AND initiator=? AND target=?",
-                (SERVER_ID, SCENARIO_ID, my_id, target_id)
+                (_sid(), _scid(), my_id, target_id)
             ).fetchone() is not None
             they_rivaled = con.execute(
                 "SELECT 1 FROM rivals WHERE server_id=? AND scenario_id=? AND initiator=? AND target=?",
-                (SERVER_ID, SCENARIO_ID, target_id, my_id)
+                (_sid(), _scid(), target_id, my_id)
             ).fetchone() is not None
             # Check active diplomacy actions
             my_action = con.execute(
                 "SELECT action_type FROM diplomacy_actions "
                 "WHERE server_id=? AND scenario_id=? AND actor=? AND target=?",
-                (SERVER_ID, SCENARIO_ID, my_id, target_id)
+                (_sid(), _scid(), my_id, target_id)
             ).fetchone()
             improve_active = my_action and my_action[0] == "improve"
             damage_active  = my_action and my_action[0] == "damage"

@@ -7,9 +7,51 @@ import os
 import sqlite3
 from contextlib import contextmanager
 
+import contextvars as _contextvars
+
 DB_PATH     = os.environ.get("WW1_DB_PATH", "ww1_scenario.db")
 SERVER_ID   = "guild_demo"
 SCENARIO_ID = "ww1"
+
+_ctx_server_id   = _contextvars.ContextVar("server_id",   default=SERVER_ID)
+_ctx_scenario_id = _contextvars.ContextVar("scenario_id", default=SCENARIO_ID)
+
+
+def _sid()  -> str: return _ctx_server_id.get()
+def _scid() -> str: return _ctx_scenario_id.get()
+
+
+def set_server_context(server_id: str, scenario_id: str = SCENARIO_ID) -> None:
+    """Set per-request server/scenario context (asyncio ContextVar — safe per-task)."""
+    _ctx_server_id.set(server_id)
+    _ctx_scenario_id.set(scenario_id)
+
+
+def ensure_guild_seeded(guild_id: str) -> bool:
+    """
+    Seed WW1 scenario data for *guild_id* if not already present.
+    Returns True if data was newly seeded, False if it already existed.
+    """
+    from ww1_economy.db       import EconomyDB
+    from ww1_economy.seed_ww1 import seed as _seed_ww1
+    db = EconomyDB(DB_PATH)
+    db.init()
+    existing = db.get_all_countries(guild_id, SCENARIO_ID)
+    if existing:
+        return False
+    _seed_ww1(db, server_id=guild_id, scenario_id=SCENARIO_ID)
+    # Seed province religions and troop definitions in this guild's context
+    set_server_context(guild_id)
+    try:
+        initialize_province_religions()
+    except Exception:
+        pass
+    try:
+        _ensure_troop_definitions_seeded()
+    except Exception:
+        pass
+    return True
+
 
 RELIGION_EMOJI: dict[str, str] = {
     "Protestant Christian": "✝️",
@@ -72,14 +114,14 @@ def get_countries() -> list[dict]:
             "       population_opinion, economy_efficiency "
             "FROM countries "
             "WHERE server_id=? AND scenario_id=? ORDER BY country_name",
-            (SERVER_ID, SCENARIO_ID),
+            (_sid(), _scid()),
         ).fetchall()
         result = []
         for r in rows:
             rel = con.execute(
                 "SELECT religion FROM country_religions "
                 "WHERE server_id=? AND scenario_id=? AND country_id=?",
-                (SERVER_ID, SCENARIO_ID, r["country_id"]),
+                (_sid(), _scid(), r["country_id"]),
             ).fetchone()
             result.append({
                 "country_id":             r["country_id"],
@@ -122,7 +164,7 @@ def update_population_growth_rate(country_id: str, new_rate: float) -> None:
     con.execute(
         "UPDATE countries SET population_growth_rate=? "
         "WHERE server_id=? AND scenario_id=? AND country_id=?",
-        (new_rate, SERVER_ID, SCENARIO_ID, country_id),
+        (new_rate, _sid(), _scid(), country_id),
     )
     con.commit()
     con.close()
@@ -133,7 +175,7 @@ def deduct_treasury(country_id: str, amount: float) -> float:
     with _conn() as con:
         row = con.execute(
             "SELECT treasury FROM countries WHERE server_id=? AND scenario_id=? AND country_id=?",
-            (SERVER_ID, SCENARIO_ID, country_id),
+            (_sid(), _scid(), country_id),
         ).fetchone()
     if row is None:
         raise ValueError("Country not found")
@@ -144,7 +186,7 @@ def deduct_treasury(country_id: str, amount: float) -> float:
     con2 = _write_conn()
     con2.execute(
         "UPDATE countries SET treasury=? WHERE server_id=? AND scenario_id=? AND country_id=?",
-        (new_balance, SERVER_ID, SCENARIO_ID, country_id),
+        (new_balance, _sid(), _scid(), country_id),
     )
     con2.commit()
     con2.close()
@@ -156,7 +198,7 @@ def credit_treasury(country_id: str, amount: float) -> None:
     con2.execute(
         "UPDATE countries SET treasury = treasury + ? "
         "WHERE server_id=? AND scenario_id=? AND country_id=?",
-        (amount, SERVER_ID, SCENARIO_ID, country_id),
+        (amount, _sid(), _scid(), country_id),
     )
     con2.commit()
     con2.close()
@@ -171,7 +213,7 @@ def get_provinces(country_id: str) -> list[dict]:
             "FROM provinces "
             "WHERE server_id=? AND scenario_id=? AND owner_country=? "
             "ORDER BY province_name",
-            (SERVER_ID, SCENARIO_ID, country_id),
+            (_sid(), _scid(), country_id),
         ).fetchall()
     return [dict(r) for r in rows]
 
@@ -184,7 +226,7 @@ def get_storage(country_id: str) -> dict:
         row = con.execute(
             "SELECT * FROM country_storage "
             "WHERE server_id=? AND scenario_id=? AND country_id=?",
-            (SERVER_ID, SCENARIO_ID, country_id),
+            (_sid(), _scid(), country_id),
         ).fetchone()
     if row:
         d = dict(row)
@@ -213,7 +255,7 @@ def deduct_storage_resources(country_id: str, resources: dict[str, int]) -> None
         con2.execute(
             f"UPDATE country_storage SET {res} = {res} - ? "
             "WHERE server_id=? AND scenario_id=? AND country_id=?",
-            (needed, SERVER_ID, SCENARIO_ID, country_id),
+            (needed, _sid(), _scid(), country_id),
         )
     con2.commit()
     con2.close()
@@ -238,7 +280,7 @@ def get_buildings_with_status(country_id: str, current_game_day: int) -> dict[st
             "  AND p.scenario_id= b.scenario_id "
             "WHERE b.server_id=? AND b.scenario_id=? AND b.country_id=? "
             "ORDER BY p.province_name",
-            (SERVER_ID, SCENARIO_ID, country_id),
+            (_sid(), _scid(), country_id),
         ).fetchall()
 
     result: dict[str, list[str]] = {}
@@ -264,7 +306,7 @@ def get_completed_building_types(country_id: str) -> set[str]:
         rows = con.execute(
             "SELECT building_type FROM buildings "
             "WHERE server_id=? AND scenario_id=? AND country_id=? AND is_completed=1",
-            (SERVER_ID, SCENARIO_ID, country_id),
+            (_sid(), _scid(), country_id),
         ).fetchall()
     return {r["building_type"] for r in rows}
 
@@ -290,8 +332,8 @@ def construct_building(
     bs       = BuildingSystem(db)
 
     return bs.start_construction(
-        server_id         = SERVER_ID,
-        scenario_id       = SCENARIO_ID,
+        server_id         = _sid(),
+        scenario_id       = _scid(),
         province_id       = str(province_id),
         country_id        = country_id,
         building_type     = building_type_str,
@@ -314,19 +356,19 @@ def _get_econ_db():
 def get_tech_status_for_country(country_id: str) -> dict[str, dict]:
     """Returns {tech_id: {is_unlocked, is_researching, research_start_day, research_end_day}}."""
     db = _get_econ_db()
-    rows = db.get_technologies_for_country(SERVER_ID, SCENARIO_ID, country_id)
+    rows = db.get_technologies_for_country(_sid(), _scid(), country_id)
     return {r["tech_id"]: r for r in rows}
 
 
 def get_reform_status_for_country(country_id: str) -> dict[str, dict]:
     db = _get_econ_db()
-    rows = db.get_reforms_for_country(SERVER_ID, SCENARIO_ID, country_id)
+    rows = db.get_reforms_for_country(_sid(), _scid(), country_id)
     return {r["reform_id"]: r for r in rows}
 
 
 def get_mil_tech_status_for_country(country_id: str) -> dict[str, dict]:
     db = _get_econ_db()
-    rows = db.get_military_technologies_for_country(SERVER_ID, SCENARIO_ID, country_id)
+    rows = db.get_military_technologies_for_country(_sid(), _scid(), country_id)
     return {r["tech_id"]: r for r in rows}
 
 
@@ -337,13 +379,13 @@ def get_active_research_info(country_id: str, game_day: int) -> dict | None:
     """
     db = _get_econ_db()
 
-    row = db.get_active_research(SERVER_ID, SCENARIO_ID, country_id)
+    row = db.get_active_research(_sid(), _scid(), country_id)
     if row:
         remaining = max(0, row["research_end_day"] - game_day)
         # If end_day has passed and tick hasn't cleared it yet, skip — it's done
         if remaining == 0 and game_day >= row["research_end_day"]:
             db.upsert_technology(
-                SERVER_ID, SCENARIO_ID, country_id, row["tech_id"],
+                _sid(), _scid(), country_id, row["tech_id"],
                 is_unlocked=True, is_researching=False,
             )
         else:
@@ -357,12 +399,12 @@ def get_active_research_info(country_id: str, game_day: int) -> dict | None:
                 "pct_done":       pct,
             }
 
-    row = db.get_active_reform_research(SERVER_ID, SCENARIO_ID, country_id)
+    row = db.get_active_reform_research(_sid(), _scid(), country_id)
     if row:
         remaining = max(0, row["research_end_day"] - game_day)
         if remaining == 0 and game_day >= row["research_end_day"]:
             db.upsert_reform(
-                SERVER_ID, SCENARIO_ID, country_id, row["reform_id"],
+                _sid(), _scid(), country_id, row["reform_id"],
                 is_unlocked=True, is_researching=False,
             )
         else:
@@ -376,11 +418,11 @@ def get_active_research_info(country_id: str, game_day: int) -> dict | None:
                 "pct_done":       pct,
             }
 
-    row = db.get_active_military_research(SERVER_ID, SCENARIO_ID, country_id)
+    row = db.get_active_military_research(_sid(), _scid(), country_id)
     if row:
         remaining = max(0, row["research_end_day"] - game_day)
         if remaining == 0 and game_day >= row["research_end_day"]:
-            db.complete_military_technology(SERVER_ID, SCENARIO_ID, country_id, row["tech_id"])
+            db.complete_military_technology(_sid(), _scid(), country_id, row["tech_id"])
         else:
             total = max(1, row["research_end_day"] - row["research_start_day"])
             done  = max(0, game_day - row["research_start_day"])
@@ -430,19 +472,19 @@ def cancel_active_research(country_id: str, game_day: int) -> dict | None:
             con.execute(
                 "UPDATE technologies SET is_researching=0 "
                 "WHERE server_id=? AND scenario_id=? AND country_id=? AND tech_id=?",
-                (SERVER_ID, SCENARIO_ID, country_id, rid),
+                (_sid(), _scid(), country_id, rid),
             )
         elif rtype == "reform":
             con.execute(
                 "UPDATE reforms SET is_researching=0 "
                 "WHERE server_id=? AND scenario_id=? AND country_id=? AND reform_id=?",
-                (SERVER_ID, SCENARIO_ID, country_id, rid),
+                (_sid(), _scid(), country_id, rid),
             )
         elif rtype == "military":
             con.execute(
                 "UPDATE military_technologies SET is_researching=0 "
                 "WHERE server_id=? AND scenario_id=? AND country_id=? AND tech_id=?",
-                (SERVER_ID, SCENARIO_ID, country_id, rid),
+                (_sid(), _scid(), country_id, rid),
             )
         con.commit()
     finally:
@@ -478,8 +520,8 @@ def start_tech_research(country_id: str, tech_id: str, game_day: int,
     end_day  = game_day + duration
 
     db.upsert_technology(
-        server_id          = SERVER_ID,
-        scenario_id        = SCENARIO_ID,
+        server_id          = _sid(),
+        scenario_id        = _scid(),
         country_id         = country_id,
         tech_id            = tech_id,
         is_unlocked        = False,
@@ -517,8 +559,8 @@ def start_reform_research(country_id: str, reform_id: str, game_day: int,
     end_day  = game_day + duration
 
     db.upsert_reform(
-        server_id          = SERVER_ID,
-        scenario_id        = SCENARIO_ID,
+        server_id          = _sid(),
+        scenario_id        = _scid(),
         country_id         = country_id,
         reform_id          = reform_id,
         is_unlocked        = False,
@@ -553,8 +595,8 @@ def start_mil_tech_research(country_id: str, tech_id: str, game_day: int,
 
     db = _get_econ_db()
     db.upsert_military_technology(
-        server_id              = SERVER_ID,
-        scenario_id            = SCENARIO_ID,
+        server_id              = _sid(),
+        scenario_id            = _scid(),
         country_id             = country_id,
         tech_id                = tech_id,
         is_unlocked            = False,
@@ -587,7 +629,7 @@ def adopt_reform(country_id: str, reform_id: str) -> dict:
     if row.get("is_adopted", False):
         return {"ok": False, "reason": "This reform is already adopted."}
 
-    adopted = db.get_adopted_reforms(SERVER_ID, SCENARIO_ID, country_id)
+    adopted = db.get_adopted_reforms(_sid(), _scid(), country_id)
     if len(adopted) >= MAX_ADOPTED_REFORMS:
         return {"ok": False, "reason": f"Maximum of **{MAX_ADOPTED_REFORMS}** reforms can be adopted at once."}
 
@@ -596,7 +638,7 @@ def adopt_reform(country_id: str, reform_id: str) -> dict:
     except ValueError as e:
         return {"ok": False, "reason": str(e)}
 
-    db.adopt_reform(SERVER_ID, SCENARIO_ID, country_id, reform_id)
+    db.adopt_reform(_sid(), _scid(), country_id, reform_id)
 
     # Apply opinion bonus immediately
     if rdef.opinion_bonus:
@@ -613,7 +655,7 @@ def _apply_opinion_delta(country_id: str, delta: int) -> None:
             "UPDATE countries "
             "SET population_opinion = MAX(0, MIN(100, population_opinion + ?)) "
             "WHERE server_id=? AND scenario_id=? AND country_id=?",
-            (delta, SERVER_ID, SCENARIO_ID, country_id),
+            (delta, _sid(), _scid(), country_id),
         )
         con.commit()
     finally:
@@ -647,13 +689,13 @@ def remove_reform(country_id: str, reform_id: str) -> dict:
     if not row.get("is_adopted", False):
         return {"ok": False, "reason": "This reform is not currently adopted."}
 
-    db.unadopt_reform(SERVER_ID, SCENARIO_ID, country_id, reform_id)
+    db.unadopt_reform(_sid(), _scid(), country_id, reform_id)
 
     # Reverse the opinion bonus
     if rdef.opinion_bonus:
         _apply_opinion_delta(country_id, -rdef.opinion_bonus)
 
-    adopted = db.get_adopted_reforms(SERVER_ID, SCENARIO_ID, country_id)
+    adopted = db.get_adopted_reforms(_sid(), _scid(), country_id)
     return {"ok": True, "adopted_count": len(adopted)}
 
 
@@ -663,7 +705,7 @@ def get_current_tax_level(country_id: str) -> str:
         row = con.execute(
             "SELECT tax_level FROM countries "
             "WHERE server_id=? AND scenario_id=? AND country_id=?",
-            (SERVER_ID, SCENARIO_ID, country_id),
+            (_sid(), _scid(), country_id),
         ).fetchone()
     if row and row["tax_level"]:
         return row["tax_level"]
@@ -704,7 +746,7 @@ def set_country_tax_level(
         con.execute(
             "UPDATE countries SET tax_level=?, tax_multiplier=? "
             "WHERE server_id=? AND scenario_id=? AND country_id=?",
-            (tax_key, new_tier["multiplier"], SERVER_ID, SCENARIO_ID, country_id),
+            (tax_key, new_tier["multiplier"], _sid(), _scid(), country_id),
         )
         con.commit()
     finally:
@@ -713,13 +755,13 @@ def set_country_tax_level(
     db  = EconomyDB(DB_PATH)
     db.init()
     eff_sys = EconomyEfficiencySystem(db)
-    eff_sys.recompute(SERVER_ID, SCENARIO_ID, country_id, current_month)
+    eff_sys.recompute(_sid(), _scid(), country_id, current_month)
 
     with _conn() as c:
         row = c.execute(
             "SELECT population_opinion, economy_efficiency FROM countries "
             "WHERE server_id=? AND scenario_id=? AND country_id=?",
-            (SERVER_ID, SCENARIO_ID, country_id),
+            (_sid(), _scid(), country_id),
         ).fetchone()
 
     opinion    = int(row["population_opinion"])  if row else 50
@@ -735,8 +777,8 @@ def get_market_snapshot() -> list[dict]:
     from ww1_economy.db import EconomyDB
     db = EconomyDB(DB_PATH)
     db.init()
-    db.init_market_prices(SERVER_ID, SCENARIO_ID)
-    return db.get_all_market(SERVER_ID, SCENARIO_ID)
+    db.init_market_prices(_sid(), _scid())
+    return db.get_all_market(_sid(), _scid())
 
 
 def buy_from_market(country_id: str, resource: str, quantity: int) -> dict:
@@ -756,7 +798,7 @@ def buy_from_market(country_id: str, resource: str, quantity: int) -> dict:
     treasury = TreasurySystem(db)
     market   = GlobalMarketSystem(db, storage, treasury)
 
-    result = market.buy_resource(SERVER_ID, SCENARIO_ID, country_id, resource, quantity)
+    result = market.buy_resource(_sid(), _scid(), country_id, resource, quantity)
     return result.to_dict()
 
 
@@ -806,7 +848,7 @@ def get_army_summary(country_id: str, game_day: int = 0) -> dict:
             "FROM armies "
             "WHERE server_id=? AND scenario_id=? AND country_id=? "
             "ORDER BY rowid",
-            (SERVER_ID, SCENARIO_ID, country_id),
+            (_sid(), _scid(), country_id),
         ).fetchall()
         total_units = 0
         army_list   = []
@@ -824,7 +866,7 @@ def get_army_summary(country_id: str, game_day: int = 0) -> dict:
             prov_row = con.execute(
                 "SELECT province_name FROM provinces "
                 "WHERE server_id=? AND scenario_id=? AND province_id=?",
-                (SERVER_ID, SCENARIO_ID, a["province_id"]),
+                (_sid(), _scid(), a["province_id"]),
             ).fetchone()
             province_name = prov_row["province_name"] if prov_row else str(a["province_id"])
 
@@ -858,7 +900,7 @@ def _ensure_troop_definitions_seeded() -> None:
     from ww1_economy.troop_definition_system import TroopDefinitionSystem
     from ww1_economy.military_tech_system    import MilitaryTechSystem
     db = _get_econ_db()
-    TroopDefinitionSystem(db, MilitaryTechSystem(db)).seed_definitions(SERVER_ID, SCENARIO_ID)
+    TroopDefinitionSystem(db, MilitaryTechSystem(db)).seed_definitions(_sid(), _scid())
 
 
 def _ensure_mil_tech_bootstrapped(country_id: str) -> None:
@@ -868,7 +910,7 @@ def _ensure_mil_tech_bootstrapped(country_id: str) -> None:
     that were never run through init_ww1_scenario.
     """
     db   = _get_econ_db()
-    rows = db.get_military_technologies_for_country(SERVER_ID, SCENARIO_ID, country_id)
+    rows = db.get_military_technologies_for_country(_sid(), _scid(), country_id)
     if not rows:
         import logging
         logging.getLogger("bot").warning(
@@ -876,7 +918,7 @@ def _ensure_mil_tech_bootstrapped(country_id: str) -> None:
             "auto-granting pre_industrial_military_doctrine.", country_id
         )
         db.upsert_military_technology(
-            SERVER_ID, SCENARIO_ID, country_id,
+            _sid(), _scid(), country_id,
             "pre_industrial_military_doctrine",
             is_unlocked=True,
         )
@@ -906,7 +948,7 @@ def get_recruitable_slots(country_id: str) -> dict[str, dict]:
 
     # Snapshot of every unlocked military tech for this country
     unlocked_techs: set[str] = set(
-        mil_sys.get_unlocked_techs(SERVER_ID, SCENARIO_ID, country_id)
+        mil_sys.get_unlocked_techs(_sid(), _scid(), country_id)
     )
     log.debug("Country %s — unlocked mil-techs: %s", country_id, sorted(unlocked_techs))
 
@@ -952,7 +994,7 @@ def get_recruitment_cap_info(country_id: str, current_month: int) -> dict:
             "       recruitment_last_reset_month "
             "FROM countries "
             "WHERE server_id=? AND scenario_id=? AND country_id=?",
-            (SERVER_ID, SCENARIO_ID, country_id),
+            (_sid(), _scid(), country_id),
         ).fetchone()
 
     if row is None:
@@ -970,7 +1012,7 @@ def get_recruitment_cap_info(country_id: str, current_month: int) -> dict:
                 "UPDATE countries "
                 "SET recruitment_used_percent=0.0, recruitment_last_reset_month=? "
                 "WHERE server_id=? AND scenario_id=? AND country_id=?",
-                (current_month, SERVER_ID, SCENARIO_ID, country_id),
+                (current_month, _sid(), _scid(), country_id),
             )
             con2.commit()
         finally:
@@ -1015,7 +1057,7 @@ def execute_army_recruitment(
     # ── 1. Tech gate (bypass troop_definitions — check is_tech_unlocked directly) ──
     from ww1_economy.military_tech_data import UNIT_TECH_REQUIREMENTS
     unlocked_techs: set[str] = set(
-        mil_sys.get_unlocked_techs(SERVER_ID, SCENARIO_ID, country_id)
+        mil_sys.get_unlocked_techs(_sid(), _scid(), country_id)
     )
     for slot, sel in unit_slots.items():
         uname         = sel["unit_name"]
@@ -1066,7 +1108,7 @@ def execute_army_recruitment(
         crow = con.execute(
             "SELECT treasury FROM countries "
             "WHERE server_id=? AND scenario_id=? AND country_id=?",
-            (SERVER_ID, SCENARIO_ID, country_id),
+            (_sid(), _scid(), country_id),
         ).fetchone()
     treasury = float(crow["treasury"] or 0.0) if crow else 0.0
 
@@ -1105,7 +1147,7 @@ def execute_army_recruitment(
             "SET total_population           = total_population - ?, "
             "    recruitment_used_percent   = recruitment_used_percent + ? "
             "WHERE server_id=? AND scenario_id=? AND country_id=?",
-            (total_pop, used_pct_added, SERVER_ID, SCENARIO_ID, country_id),
+            (total_pop, used_pct_added, _sid(), _scid(), country_id),
         )
         con2.commit()
     finally:
@@ -1114,8 +1156,8 @@ def execute_army_recruitment(
     army_id = str(uuid.uuid4())
     db.insert_army(
         army_id          = army_id,
-        server_id        = SERVER_ID,
-        scenario_id      = SCENARIO_ID,
+        server_id        = _sid(),
+        scenario_id      = _scid(),
         country_id       = country_id,
         province_id      = str(province_id),
         base_province_id = str(province_id),
@@ -1133,8 +1175,8 @@ def execute_army_recruitment(
             army_id      = army_id,
             unit_name    = sel["unit_name"],
             quantity     = sel["qty"],
-            server_id    = SERVER_ID,
-            scenario_id  = SCENARIO_ID,
+            server_id    = _sid(),
+            scenario_id  = _scid(),
         )
 
     return {
@@ -1152,7 +1194,7 @@ def execute_army_recruitment(
 def get_all_relations_for_country(country_id: str) -> dict[str, float]:
     """Returns {other_country_id: base_relation} for every country that has a row."""
     db = _get_econ_db()
-    rows = db.get_all_relations(SERVER_ID, SCENARIO_ID)
+    rows = db.get_all_relations(_sid(), _scid())
     result: dict[str, float] = {}
     for r in rows:
         if r["country_a"] == country_id:
@@ -1165,7 +1207,7 @@ def get_all_relations_for_country(country_id: str) -> dict[str, float]:
 def get_relation_value(country_a: str, country_b: str) -> float:
     """Return base_relation between two countries (default 50 if no row)."""
     db = _get_econ_db()
-    row = db.get_relation(SERVER_ID, SCENARIO_ID, country_a, country_b)
+    row = db.get_relation(_sid(), _scid(), country_a, country_b)
     return float(row["base_relation"]) if row else 50.0
 
 
@@ -1176,7 +1218,7 @@ def is_rival(country_a: str, country_b: str) -> bool:
             "SELECT 1 FROM rivals "
             "WHERE server_id=? AND scenario_id=? "
             "AND ((initiator=? AND target=?) OR (initiator=? AND target=?))",
-            (SERVER_ID, SCENARIO_ID, country_a, country_b, country_b, country_a),
+            (_sid(), _scid(), country_a, country_b, country_b, country_a),
         ).fetchone()
     return row is not None
 
@@ -1188,7 +1230,7 @@ def is_at_war(country_a: str, country_b: str) -> bool:
             SELECT 1 FROM wars
             WHERE server_id=? AND scenario_id=? AND status='active'
             AND ((attacker=? AND defender=?) OR (attacker=? AND defender=?))
-        """, (SERVER_ID, SCENARIO_ID, country_a, country_b, country_b, country_a)
+        """, (_sid(), _scid(), country_a, country_b, country_b, country_a)
         ).fetchone()
     return row is not None
 
@@ -1201,7 +1243,7 @@ def are_allied(country_a: str, country_b: str) -> bool:
             JOIN alliance_members m2 ON m1.alliance_id = m2.alliance_id
             WHERE m1.country_id=? AND m2.country_id=?
             AND m1.server_id=? AND m1.scenario_id=?
-        """, (country_a, country_b, SERVER_ID, SCENARIO_ID)).fetchone()
+        """, (country_a, country_b, _sid(), _scid())).fetchone()
     return row is not None
 
 
@@ -1212,7 +1254,7 @@ def _upsert_diplomacy_action(actor: str, target: str, action_type: str) -> None:
         VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(server_id, scenario_id, actor, target)
         DO UPDATE SET action_type=excluded.action_type
-    """, (SERVER_ID, SCENARIO_ID, actor, target, action_type))
+    """, (_sid(), _scid(), actor, target, action_type))
     con.commit()
     con.close()
 
@@ -1222,7 +1264,7 @@ def _remove_diplomacy_action(actor: str, target: str) -> None:
     con.execute(
         "DELETE FROM diplomacy_actions "
         "WHERE server_id=? AND scenario_id=? AND actor=? AND target=?",
-        (SERVER_ID, SCENARIO_ID, actor, target),
+        (_sid(), _scid(), actor, target),
     )
     con.commit()
     con.close()
@@ -1264,7 +1306,7 @@ def diplo_rivalry(actor: str, target: str) -> dict:
     if is_at_war(actor, target):
         return {"ok": False, "reason": "⚔️ You are already at war — rivalry is redundant."}
     db = _get_econ_db()
-    new_rel = db.adjust_base_relation(SERVER_ID, SCENARIO_ID, actor, target, -10.0)
+    new_rel = db.adjust_base_relation(_sid(), _scid(), actor, target, -10.0)
     # Cancel any improve actions in either direction
     _remove_diplomacy_action(actor, target)
     _remove_diplomacy_action(target, actor)
@@ -1272,7 +1314,7 @@ def diplo_rivalry(actor: str, target: str) -> dict:
     con = _write_conn()
     con.execute(
         "INSERT OR IGNORE INTO rivals (server_id, scenario_id, initiator, target) VALUES (?,?,?,?)",
-        (SERVER_ID, SCENARIO_ID, actor, target),
+        (_sid(), _scid(), actor, target),
     )
     con.commit()
     con.close()
@@ -1296,9 +1338,9 @@ def diplo_alliance(actor: str, target: str) -> dict:
     import uuid as _uuid
     alliance_id = str(_uuid.uuid4())
     db = _get_econ_db()
-    db.insert_alliance(alliance_id, SERVER_ID, SCENARIO_ID, f"{actor}-{target} Alliance")
-    db.add_alliance_member(alliance_id, actor, SERVER_ID, SCENARIO_ID)
-    db.add_alliance_member(alliance_id, target, SERVER_ID, SCENARIO_ID)
+    db.insert_alliance(alliance_id, _sid(), _scid(), f"{actor}-{target} Alliance")
+    db.add_alliance_member(alliance_id, actor, _sid(), _scid())
+    db.add_alliance_member(alliance_id, target, _sid(), _scid())
     return {"ok": True, "alliance_id": alliance_id}
 
 
@@ -1317,10 +1359,10 @@ def diplo_declare_war(actor: str, target: str, game_day: int) -> dict:
     import uuid as _uuid
     war_id = str(_uuid.uuid4())
     db = _get_econ_db()
-    db.insert_war(war_id, SERVER_ID, SCENARIO_ID, actor, target, game_day)
+    db.insert_war(war_id, _sid(), _scid(), actor, target, game_day)
     db.insert_war_participant(war_id, actor, "attacker", is_leader=True)
     db.insert_war_participant(war_id, target, "defender", is_leader=True)
-    db.upsert_relation(SERVER_ID, SCENARIO_ID, actor, target, 0.0)
+    db.upsert_relation(_sid(), _scid(), actor, target, 0.0)
     # Cancel any diplomacy actions between them
     _remove_diplomacy_action(actor, target)
     _remove_diplomacy_action(target, actor)
@@ -1339,7 +1381,7 @@ def diplo_send_gift(actor: str, target: str) -> dict:
         return {"ok": False, "reason": str(e)}
     credit_treasury(target, GIFT_GOLD)
     db = _get_econ_db()
-    new_rel = db.adjust_base_relation(SERVER_ID, SCENARIO_ID, actor, target, GIFT_REL)
+    new_rel = db.adjust_base_relation(_sid(), _scid(), actor, target, GIFT_REL)
     return {"ok": True, "new_relation": new_rel}
 
 
@@ -1348,11 +1390,11 @@ def get_rivals_of(country_id: str) -> tuple[list[str], list[str]]:
     with _conn() as con:
         our   = [r[0] for r in con.execute(
             "SELECT target FROM rivals WHERE server_id=? AND scenario_id=? AND initiator=?",
-            (SERVER_ID, SCENARIO_ID, country_id),
+            (_sid(), _scid(), country_id),
         ).fetchall()]
         their = [r[0] for r in con.execute(
             "SELECT initiator FROM rivals WHERE server_id=? AND scenario_id=? AND target=?",
-            (SERVER_ID, SCENARIO_ID, country_id),
+            (_sid(), _scid(), country_id),
         ).fetchall()]
     return our, their
 
@@ -1364,7 +1406,7 @@ def get_ally_country_ids(country_id: str) -> list[str]:
         alliances = [r[0] for r in con.execute(
             "SELECT alliance_id FROM alliance_members "
             "WHERE server_id=? AND scenario_id=? AND country_id=?",
-            (SERVER_ID, SCENARIO_ID, country_id),
+            (_sid(), _scid(), country_id),
         ).fetchall()]
         if not alliances:
             return []
@@ -1386,7 +1428,7 @@ def get_active_wars_for_country(country_id: str) -> list[dict]:
             LEFT JOIN war_participants wp ON w.war_id = wp.war_id
             WHERE w.server_id=? AND w.scenario_id=? AND w.status='active'
             AND (w.attacker=? OR w.defender=? OR wp.country_id=?)
-        """, (SERVER_ID, SCENARIO_ID, country_id, country_id, country_id)
+        """, (_sid(), _scid(), country_id, country_id, country_id)
         ).fetchall()
     return [dict(r) for r in rows]
 
@@ -1479,16 +1521,16 @@ def _get_occupation_system():
 
 def war_declare(attacker: str, defender: str, game_day: int) -> dict:
     """Declare war. Returns {ok, war_id, message}."""
-    res = _get_war_system().declare_war(SERVER_ID, SCENARIO_ID, attacker, defender, game_day)
+    res = _get_war_system().declare_war(_sid(), _scid(), attacker, defender, game_day)
     if res.ok:
         db = _get_shared_war_db()
         for cid in (attacker, defender):
-            row = db.get_country(SERVER_ID, SCENARIO_ID, cid)
+            row = db.get_country(_sid(), _scid(), cid)
             if row:
                 new_opinion = max(0, int(row.get("population_opinion") or 50) - 5)
                 new_eff     = max(0.5, float(row.get("economy_efficiency") or 1.0) - 0.10)
                 db.update_country_fields(
-                    SERVER_ID, SCENARIO_ID, cid,
+                    _sid(), _scid(), cid,
                     population_opinion=new_opinion,
                     economy_efficiency=new_eff,
                     in_active_war=1,
@@ -1518,7 +1560,7 @@ def war_proclaim_victory(war_id: str, country_id: str) -> dict:
 
 
 def war_add_ally(war_id: str, country_id: str, side: str) -> dict:
-    msg = _get_war_system().add_ally_to_war(war_id, SERVER_ID, SCENARIO_ID, country_id, side)
+    msg = _get_war_system().add_ally_to_war(war_id, _sid(), _scid(), country_id, side)
     ok  = "not found" not in msg.lower() and "is not active" not in msg.lower()
     return {"ok": ok, "message": msg}
 
@@ -1528,7 +1570,7 @@ def war_move_army(army_id: str, dest_province_id: str,
     """Order an army to move. Returns {ok, travel_days, arrival_day, message}."""
     res = _get_army_system().move_army(
         army_id, dest_province_id, provinces_to_traverse,
-        game_day, SERVER_ID, SCENARIO_ID,
+        game_day, _sid(), _scid(),
     )
     return {
         "ok":          res.ok,
@@ -1566,7 +1608,7 @@ def get_country_armies(country_id: str) -> list[dict]:
             "WHERE a.server_id=? AND a.scenario_id=? AND a.country_id=? "
             "  AND a.state NOT IN ('destroyed') "
             "ORDER BY a.rowid",
-            (SERVER_ID, SCENARIO_ID, country_id),
+            (_sid(), _scid(), country_id),
         ).fetchall()
     result = []
     for i, r in enumerate(rows, start=1):
@@ -1585,7 +1627,7 @@ def get_all_provinces_list(owner_country: str | None = None,
             "FROM provinces "
             "WHERE server_id=? AND scenario_id=? "
             "ORDER BY province_name",
-            (SERVER_ID, SCENARIO_ID),
+            (_sid(), _scid()),
         ).fetchall()
     all_provs = [dict(r) for r in rows]
 
@@ -1602,7 +1644,7 @@ def get_war_between(country_a: str, country_b: str) -> dict | None:
     with _conn() as con:
         wars = con.execute(
             "SELECT * FROM wars WHERE server_id=? AND scenario_id=? AND status='active'",
-            (SERVER_ID, SCENARIO_ID),
+            (_sid(), _scid()),
         ).fetchall()
         for w in wars:
             w = dict(w)
@@ -1627,7 +1669,7 @@ def get_active_wars_all() -> list[dict]:
     with _conn() as con:
         rows = con.execute(
             "SELECT * FROM wars WHERE server_id=? AND scenario_id=? AND status='active'",
-            (SERVER_ID, SCENARIO_ID),
+            (_sid(), _scid()),
         ).fetchall()
     return [dict(r) for r in rows]
 
@@ -1645,7 +1687,7 @@ def get_occupied_provinces_by_winner(war_id: str, winner_id: str) -> list[dict]:
                 row = con.execute(
                     "SELECT * FROM provinces "
                     "WHERE server_id=? AND scenario_id=? AND province_id=?",
-                    (SERVER_ID, SCENARIO_ID, occ["province_id"]),
+                    (_sid(), _scid(), occ["province_id"]),
                 ).fetchone()
                 if row:
                     result.append(dict(row))
@@ -1669,7 +1711,7 @@ def get_non_core_provinces(country_id: str) -> list[dict]:
               AND pc.is_core = 0
             ORDER BY p.province_name
             """,
-            (country_id, SERVER_ID, SCENARIO_ID, country_id),
+            (country_id, _sid(), _scid(), country_id),
         ).fetchall()
     return [dict(r) for r in rows]
 
@@ -1680,7 +1722,7 @@ def get_country_religion(country_id: str) -> str | None:
         row = con.execute(
             "SELECT religion FROM country_religions "
             "WHERE server_id=? AND scenario_id=? AND country_id=?",
-            (SERVER_ID, SCENARIO_ID, country_id),
+            (_sid(), _scid(), country_id),
         ).fetchone()
     return row["religion"] if row else None
 
@@ -1704,7 +1746,7 @@ def get_different_religion_provinces(country_id: str) -> list[dict]:
               AND (pr.religion IS NULL OR pr.religion != ?)
             ORDER BY p.province_name
             """,
-            (SERVER_ID, SCENARIO_ID, country_id, crel),
+            (_sid(), _scid(), country_id, crel),
         ).fetchall()
     return [dict(r) for r in rows]
 
@@ -1715,7 +1757,7 @@ def start_core_conversion(
     """Begin a non-core → core conversion for a province."""
     db = _get_shared_war_db()
     db.upsert_province_core(
-        SERVER_ID, SCENARIO_ID, province_id, country_id,
+        _sid(), _scid(), province_id, country_id,
         is_core=0, conversion_start_day=start_day, conversion_end_day=end_day,
     )
 
@@ -1727,7 +1769,7 @@ def start_religion_conversion(
     """Begin a religion conversion for a province."""
     db = _get_shared_war_db()
     db.upsert_province_religion_conversion(
-        SERVER_ID, SCENARIO_ID, province_id,
+        _sid(), _scid(), province_id,
         from_religion, to_religion, start_day, end_day,
     )
 
@@ -1788,12 +1830,12 @@ def war_end(war_id: str, status: str = "attacker_victory") -> dict:
         all_countries.add(war["attacker"])
         all_countries.add(war["defender"])
         for cid in all_countries:
-            row = db.get_country(SERVER_ID, SCENARIO_ID, cid)
+            row = db.get_country(_sid(), _scid(), cid)
             if row:
                 eff = float(row.get("economy_efficiency") or 1.0)
                 op  = int(row.get("population_opinion")   or 50)
                 db.update_country_fields(
-                    SERVER_ID, SCENARIO_ID, cid,
+                    _sid(), _scid(), cid,
                     economy_efficiency=min(1.0, eff + 0.10),
                     population_opinion=min(100, op + 5),
                 )
@@ -1809,7 +1851,7 @@ def initialize_province_religions() -> None:
     provinces = con.execute(
         "SELECT province_id, owner_country FROM provinces "
         "WHERE server_id=? AND scenario_id=?",
-        (SERVER_ID, SCENARIO_ID),
+        (_sid(), _scid()),
     ).fetchall()
     for prov in provinces:
         pid   = prov["province_id"]
@@ -1819,20 +1861,20 @@ def initialize_province_religions() -> None:
         existing = con.execute(
             "SELECT 1 FROM province_religions "
             "WHERE server_id=? AND scenario_id=? AND province_id=?",
-            (SERVER_ID, SCENARIO_ID, pid),
+            (_sid(), _scid(), pid),
         ).fetchone()
         if existing:
             continue
         rel_row = con.execute(
             "SELECT religion FROM country_religions "
             "WHERE server_id=? AND scenario_id=? AND country_id=?",
-            (SERVER_ID, SCENARIO_ID, owner),
+            (_sid(), _scid(), owner),
         ).fetchone()
         if rel_row and rel_row["religion"]:
             con.execute(
                 "INSERT OR IGNORE INTO province_religions "
                 "(server_id, scenario_id, province_id, religion) VALUES (?,?,?,?)",
-                (SERVER_ID, SCENARIO_ID, pid, rel_row["religion"]),
+                (_sid(), _scid(), pid, rel_row["religion"]),
             )
     con.commit()
     con.close()
@@ -1861,7 +1903,7 @@ def get_detailed_armies(country_id: str) -> list[dict]:
               AND a.state NOT IN ('destroyed')
             ORDER BY a.rowid
             """,
-            (SERVER_ID, SCENARIO_ID, country_id),
+            (_sid(), _scid(), country_id),
         ).fetchall()
     result = []
     for i, r in enumerate(rows, start=1):

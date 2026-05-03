@@ -13,7 +13,6 @@ from discord_bot.map_renderer import (
     COUNTRY_DISPLAY_NAMES,
     DEFAULT_COLOR,
 )
-from discord_bot.ww1_data import SERVER_ID
 
 log = logging.getLogger(__name__)
 
@@ -41,8 +40,9 @@ class MapCog(commands.Cog, name="Map"):
         try:
             from discord_bot.map_renderer import render_map_png
             loop      = asyncio.get_event_loop()
+            guild_id  = str(ctx.guild.id)
             png_bytes = await loop.run_in_executor(
-                None, lambda: render_map_png(server_id=SERVER_ID)
+                None, lambda: render_map_png(server_id=guild_id)
             )
         except Exception as exc:
             log.exception("Map render failed")

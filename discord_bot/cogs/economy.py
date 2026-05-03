@@ -667,6 +667,9 @@ class QuantityModal(discord.ui.Modal, title="Enter Quantity"):
         self.guild_id   = guild_id
 
     async def on_submit(self, interaction: discord.Interaction):
+        if interaction.guild_id:
+            from discord_bot.ww1_data import set_server_context
+            set_server_context(str(interaction.guild_id))
         raw = self.quantity.value.strip().replace(",", "")
         try:
             qty = int(raw)

@@ -11,6 +11,9 @@ class SecureView(discord.ui.View):
         self.user_id = user_id
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.guild_id:
+            from discord_bot.ww1_data import set_server_context
+            set_server_context(str(interaction.guild_id))
         if interaction.user.id != self.user_id:
             await interaction.response.send_message(
                 "You cannot use this interaction.", ephemeral=True

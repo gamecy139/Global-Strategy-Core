@@ -33,9 +33,9 @@ from ww1_economy.db import EconomyDB
 
 log = logging.getLogger("tick")
 
-WW1_DB      = os.environ.get("WW1_DB_PATH", "ww1_scenario.db")
-SERVER_ID   = "guild_demo"
-SCENARIO_ID = "ww1"
+WW1_DB = os.environ.get("WW1_DB_PATH", "ww1_scenario.db")
+
+from discord_bot.ww1_data import _sid, _scid, set_server_context  # noqa: E402
 
 _tick_system = None
 _bot_ref     = None          # set by start_tick(); used for battle channel embeds
@@ -57,7 +57,7 @@ def _apply_monthly_growth(country_id: str, months_crossed: int) -> None:
         return
     db = EconomyDB(WW1_DB)
     db.init()
-    row = db.get_country(SERVER_ID, SCENARIO_ID, country_id)
+    row = db.get_country(_sid(), _scid(), country_id)
     if row is None:
         return
     pop    = int(row.get("total_population") or 0)
@@ -66,7 +66,7 @@ def _apply_monthly_growth(country_id: str, months_crossed: int) -> None:
     new_pop = int(pop * factor)
     try:
         db.update_country_fields(
-            SERVER_ID, SCENARIO_ID, country_id,
+            _sid(), _scid(), country_id,
             total_population=new_pop,
         )
         import sqlite3
@@ -74,7 +74,7 @@ def _apply_monthly_growth(country_id: str, months_crossed: int) -> None:
         con.execute(
             "UPDATE provinces SET population = CAST(population * ? AS INTEGER) "
             "WHERE server_id=? AND scenario_id=? AND owner_country=?",
-            (factor, SERVER_ID, SCENARIO_ID, country_id),
+            (factor, _sid(), _scid(), country_id),
         )
         con.commit()
         con.close()
@@ -122,7 +122,7 @@ def _province_name_lookup(province_id: str) -> str:
     row = con.execute(
         "SELECT province_name FROM provinces "
         "WHERE server_id=? AND scenario_id=? AND province_id=?",
-        (SERVER_ID, SCENARIO_ID, province_id),
+        (_sid(), _scid(), province_id),
     ).fetchone()
     con.close()
     return row["province_name"] if row else province_id
@@ -136,7 +136,7 @@ def _build_name_map_inline() -> dict[str, str]:
     rows = con.execute(
         "SELECT country_id, country_name FROM countries "
         "WHERE server_id=? AND scenario_id=?",
-        (SERVER_ID, SCENARIO_ID),
+        (_sid(), _scid()),
     ).fetchall()
     con.close()
     return {r["country_id"]: r["country_name"] for r in rows}
@@ -167,7 +167,7 @@ def _process_military_tick(new_game_day: int) -> dict:
     _occup_events:  list                = []   # discord.Embed objects for occupation feedback
 
     # 1 — Movement arrivals
-    arrivals = army_sys.process_movement(SERVER_ID, SCENARIO_ID, new_game_day)
+    arrivals = army_sys.process_movement(_sid(), _scid(), new_game_day)
     for evt in arrivals:
         log.info("Army %s arrived at '%s' (country %s).",
                  evt.army_id[:8], evt.province_id, evt.country_id)
@@ -179,7 +179,7 @@ def _process_military_tick(new_game_day: int) -> dict:
         prov_row = _con.execute(
             "SELECT owner_country FROM provinces "
             "WHERE server_id=? AND scenario_id=? AND province_id=?",
-            (SERVER_ID, SCENARIO_ID, evt.province_id),
+            (_sid(), _scid(), evt.province_id),
         ).fetchone()
         _con.close()
 
@@ -188,21 +188,21 @@ def _process_military_tick(new_game_day: int) -> dict:
             w = get_war_between(evt.country_id, owner_id)
             if w:
                 occ_sys.start_occupation(
-                    SERVER_ID, SCENARIO_ID, evt.province_id,
+                    _sid(), _scid(), evt.province_id,
                     w["war_id"], evt.country_id, new_game_day,
                 )
                 log.info("Occupation started: %s by %s (war %s).",
                          evt.province_id, evt.country_id, w["war_id"][:8])
 
                 enemy_armies = [
-                    a for a in db.get_armies_in_province(SERVER_ID, SCENARIO_ID, evt.province_id)
+                    a for a in db.get_armies_in_province(_sid(), _scid(), evt.province_id)
                     if a["country_id"] != evt.country_id
                     and a["state"] not in ("destroyed", "moving")
                 ]
                 if enemy_armies:
                     enemy_row = enemy_armies[0]
                     trig = bat_sys.trigger_battle(
-                        SERVER_ID, SCENARIO_ID, w["war_id"],
+                        _sid(), _scid(), w["war_id"],
                         evt.army_id, enemy_row["army_id"],
                         evt.province_id, new_game_day,
                     )
@@ -220,7 +220,7 @@ def _process_military_tick(new_game_day: int) -> dict:
                         })
 
     # 2 — Tick active battles
-    battle_result = bat_sys.process_all_battles(SERVER_ID, SCENARIO_ID, new_game_day)
+    battle_result = bat_sys.process_all_battles(_sid(), _scid(), new_game_day)
     for tick in battle_result.events:
         log.info("Battle tick: %s", tick.message)
         if tick.winner_army_id:
@@ -250,11 +250,11 @@ def _process_military_tick(new_game_day: int) -> dict:
             })
 
     # 3 — Tick province occupations for every active war
-    active_wars = db.get_active_wars(SERVER_ID, SCENARIO_ID)
+    active_wars = db.get_active_wars(_sid(), _scid())
     for w in active_wars:
         w = dict(w)
         occ_result = occ_sys.process_occupations(
-            SERVER_ID, SCENARIO_ID, w["war_id"], new_game_day
+            _sid(), _scid(), w["war_id"], new_game_day
         )
         for oe in occ_result.completed:
             log.info("Province fully occupied: %s by %s%s.",
@@ -267,7 +267,7 @@ def _process_military_tick(new_game_day: int) -> dict:
                 _prow = _con.execute(
                     "SELECT province_name, owner_country FROM provinces "
                     "WHERE server_id=? AND scenario_id=? AND province_id=?",
-                    (SERVER_ID, SCENARIO_ID, oe.province_id),
+                    (_sid(), _scid(), oe.province_id),
                 ).fetchone()
                 _con.close()
                 if _prow:
@@ -284,7 +284,7 @@ def _process_military_tick(new_game_day: int) -> dict:
         # 4 — Supply consumption
         war_start = int(w.get("start_day") or 0)
         supply_results = army_sys.process_all_supply(
-            SERVER_ID, SCENARIO_ID, new_game_day, war_start
+            _sid(), _scid(), new_game_day, war_start
         )
         for sr in supply_results:
             if not (sr.food_met and sr.ammo_met and sr.medicine_met):
@@ -297,7 +297,7 @@ def _process_military_tick(new_game_day: int) -> dict:
         try:
             attacker = w["attacker"]
             defender = w["defender"]
-            def_provs = db.get_provinces_by_country(SERVER_ID, SCENARIO_ID, defender)
+            def_provs = db.get_provinces_by_country(_sid(), _scid(), defender)
             total_def = len(def_provs)
             if total_def > 0:
                 occs = db.get_war_occupations(w["war_id"])
@@ -341,6 +341,7 @@ async def tick_task() -> None:
     sessions = game_state.get_all_sessions()
     for session in sessions:
         guild_id        = session["guild_id"]
+        set_server_context(guild_id)      # isolate all DB ops to this guild
         game_day_before = session["game_day"]
 
         days_advanced, new_game_day = game_state.advance_tick(guild_id)
@@ -353,7 +354,7 @@ async def tick_task() -> None:
 
         # ── Daily tick: building completions, tech/reform completions, income ──
         try:
-            report = ts.daily_tick(SERVER_ID, SCENARIO_ID, new_game_day, days_advanced)
+            report = ts.daily_tick(_sid(), _scid(), new_game_day, days_advanced)
             from discord_bot.ww1_data import apply_hospital_opinion
             for bldg in report.building_completions:
                 if bldg.get("building_type") == "Hospital":
@@ -367,7 +368,7 @@ async def tick_task() -> None:
             _mil_db = EconomyDB(WW1_DB)
             _mil_db.init()
             mil_events = MilitaryTechSystem(_mil_db).process_completions(
-                SERVER_ID, SCENARIO_ID, new_game_day
+                _sid(), _scid(), new_game_day
             )
             for evt in mil_events:
                 log.info(
@@ -386,7 +387,7 @@ async def tick_task() -> None:
                 "SELECT army_id FROM armies "
                 "WHERE server_id=? AND scenario_id=? "
                 "AND state='recruiting' AND recruitment_end_day <= ?",
-                (SERVER_ID, SCENARIO_ID, new_game_day),
+                (_sid(), _scid(), new_game_day),
             ).fetchall()
             for row in due:
                 _con.execute(
@@ -451,7 +452,7 @@ async def tick_task() -> None:
 
         if months_crossed > 0:
             try:
-                ts.monthly_tick(SERVER_ID, SCENARIO_ID, month_after)
+                ts.monthly_tick(_sid(), _scid(), month_after)
             except Exception as e:
                 log.warning("Monthly tick error: %s", e)
 
@@ -464,7 +465,7 @@ async def tick_task() -> None:
                 from ww1_economy.db import EconomyDB as _EconDB
                 _dip_db = _EconDB(WW1_DB)
                 _dip_db.init()
-                actions = get_active_diplomacy_actions(SERVER_ID, SCENARIO_ID)
+                actions = get_active_diplomacy_actions(_sid(), _scid())
                 for act in actions:
                     actor  = act["actor"]
                     target = act["target"]
@@ -472,11 +473,11 @@ async def tick_task() -> None:
                     if atype == "improve":
                         if not is_rival(actor, target):
                             _dip_db.adjust_base_relation(
-                                SERVER_ID, SCENARIO_ID, actor, target, +5.0
+                                _sid(), _scid(), actor, target, +5.0
                             )
                     elif atype == "damage":
                         _dip_db.adjust_base_relation(
-                            SERVER_ID, SCENARIO_ID, actor, target, -5.0
+                            _sid(), _scid(), actor, target, -5.0
                         )
                 if actions:
                     log.info("Applied monthly diplomacy drifts for %d actions.", len(actions))
