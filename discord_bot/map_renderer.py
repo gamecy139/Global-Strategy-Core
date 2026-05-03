@@ -211,22 +211,26 @@ def render_map_png(
         # Set fill attribute directly — hex only, never a color name
         element.set("fill", color)
 
-    # ── Save colored SVG per-server if requested ───────────────────────────
+    # ── Write colored SVG to disk ──────────────────────────────────────────
+    # Always write to a file so rsvg-convert reads the exact same bytes
+    # that are saved as the per-server artifact (no separate temp copy).
     if svg_output_path:
-        tree.write(svg_output_path, xml_declaration=True, encoding="UTF-8")
-        log.debug("Colored SVG saved: %s", svg_output_path)
+        svg_source = svg_output_path
+        tree.write(svg_source, xml_declaration=True, encoding="UTF-8")
+        log.debug("Colored SVG saved: %s", svg_source)
+        delete_svg = False
+    else:
+        svg_tmp = tempfile.NamedTemporaryFile(suffix=".svg", delete=False)
+        tree.write(svg_tmp.name, xml_declaration=True, encoding="UTF-8")
+        svg_tmp.close()
+        svg_source = svg_tmp.name
+        delete_svg = True
 
-    # ── Render to PNG via rsvg-convert ────────────────────────────────────
-    svg_bytes = etree.tostring(root, xml_declaration=True, encoding="UTF-8")
-
-    with tempfile.NamedTemporaryFile(suffix=".svg", delete=False) as svg_tmp:
-        svg_tmp.write(svg_bytes)
-        svg_path = svg_tmp.name
-
-    png_path = svg_path.replace(".svg", ".png")
+    # ── Render to PNG via rsvg-convert (reads the same file saved above) ──
+    png_path = svg_source.replace(".svg", ".png")
     try:
         subprocess.run(
-            [RSVG_CONVERT, "-w", str(output_width), svg_path, "-o", png_path],
+            [RSVG_CONVERT, "-w", str(output_width), svg_source, "-o", png_path],
             check=True,
             timeout=60,
             capture_output=True,
@@ -234,8 +238,12 @@ def render_map_png(
         with open(png_path, "rb") as f:
             return f.read()
     finally:
-        for p in (svg_path, png_path):
+        try:
+            os.unlink(png_path)
+        except FileNotFoundError:
+            pass
+        if delete_svg:
             try:
-                os.unlink(p)
+                os.unlink(svg_source)
             except FileNotFoundError:
                 pass

@@ -56,10 +56,8 @@ class MapCog(commands.Cog, name="Map"):
             await status.edit(content=f"❌  Map render failed: {exc}")
             return
 
-        # Send the colored SVG (per-server) as a file attachment
-        svg_file  = discord.File(svg_output, filename=os.path.basename(svg_output))
-        # Also embed the PNG for inline preview
-        png_file  = discord.File(io.BytesIO(png_bytes), filename="map.png")
+        # Attach the colored PNG (converted from the per-server colored SVG)
+        png_file = discord.File(io.BytesIO(png_bytes), filename="map.png")
         embed = discord.Embed(
             title="⚔️  Political Map — WW1 1914",
             colour=0x2B2D31,
@@ -69,7 +67,7 @@ class MapCog(commands.Cog, name="Map"):
         embed.add_field(name="\u200b",      value=_LEGEND_UNOWNED, inline=False)
         embed.set_image(url="attachment://map.png")
         await status.delete()
-        await ctx.send(files=[png_file, svg_file], embed=embed)
+        await ctx.send(file=png_file, embed=embed)
 
 
 async def setup(bot: commands.Bot) -> None:
