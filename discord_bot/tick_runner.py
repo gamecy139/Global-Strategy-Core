@@ -96,6 +96,7 @@ def _get_military_systems():
     global _military_systems_cache
     if _military_systems_cache is None:
         from ww1_economy.db               import EconomyDB
+        from ww1_economy.religion_system  import ReligionSystem
         from ww1_economy.diplomacy_system  import DiplomacySystem
         from ww1_economy.war_system        import WarSystem
         from ww1_economy.army_system       import ArmySystem
@@ -103,7 +104,8 @@ def _get_military_systems():
         from ww1_economy.occupation_system import OccupationSystem
         db  = EconomyDB(WW1_DB)
         db.init()
-        dip = DiplomacySystem(db)
+        rel = ReligionSystem(db)
+        dip = DiplomacySystem(db, rel)
         war = WarSystem(db, dip)
         arm = ArmySystem(db)
         bat = BattleSystem(db, arm, war)
@@ -160,8 +162,9 @@ def _process_military_tick(new_game_day: int) -> dict:
     """
     db, war_sys, army_sys, bat_sys, occ_sys = _get_military_systems()
 
-    battle_starts: list[dict] = []
-    battle_ends:   list[dict] = []
+    battle_starts:  list[dict]          = []
+    battle_ends:    list[dict]          = []
+    _occup_events:  list                = []   # discord.Embed objects for occupation feedback
 
     # 1 — Movement arrivals
     arrivals = army_sys.process_movement(SERVER_ID, SCENARIO_ID, new_game_day)
@@ -257,6 +260,26 @@ def _process_military_tick(new_game_day: int) -> dict:
             log.info("Province fully occupied: %s by %s%s.",
                      oe.province_id, oe.occupying_country,
                      f" ({oe.war_score_event})" if oe.war_score_event else "")
+            try:
+                import sqlite3 as _sql
+                _con = _sql.connect(WW1_DB)
+                _con.row_factory = _sql.Row
+                _prow = _con.execute(
+                    "SELECT province_name, owner_country FROM provinces "
+                    "WHERE server_id=? AND scenario_id=? AND province_id=?",
+                    (SERVER_ID, SCENARIO_ID, oe.province_id),
+                ).fetchone()
+                _con.close()
+                if _prow:
+                    _pname   = _prow["province_name"]
+                    _prev    = _prow["owner_country"] or oe.province_id
+                    _nm      = _build_name_map_inline()
+                    _occ_em  = embeds.occupation_feedback_embed(
+                        _pname, oe.occupying_country, _prev, _nm
+                    )
+                    _occup_events.append(_occ_em)
+            except Exception as _occ_err:
+                log.warning("Occupation embed lookup failed: %s", _occ_err)
 
         # 4 — Supply consumption
         war_start = int(w.get("start_day") or 0)
@@ -302,7 +325,11 @@ def _process_military_tick(new_game_day: int) -> dict:
         except Exception as _e:
             log.warning("War score auto-boost error: %s", _e)
 
-    return {"battle_starts": battle_starts, "battle_ends": battle_ends}
+    return {
+        "battle_starts":  battle_starts,
+        "battle_ends":    battle_ends,
+        "occup_embeds":   _occup_events,
+    }
 
 
 # ── Main tick task ─────────────────────────────────────────────────────────────
@@ -374,14 +401,18 @@ async def tick_task() -> None:
             log.warning("Army graduation error: %s", e)
 
         # ── Military tick: movement, battles, occupation, supply, auto-boost ──
-        mil_events: dict = {"battle_starts": [], "battle_ends": []}
+        mil_events: dict = {"battle_starts": [], "battle_ends": [], "occup_embeds": []}
         try:
             mil_events = _process_military_tick(new_game_day)
         except Exception as e:
             log.warning("Military tick error: %s", e)
 
-        # ── Battle channel notifications ──────────────────────────────────────
-        if _bot_ref and (mil_events["battle_starts"] or mil_events["battle_ends"]):
+        # ── Battle + Occupation channel notifications ─────────────────────────
+        if _bot_ref and (
+            mil_events["battle_starts"]
+            or mil_events["battle_ends"]
+            or mil_events["occup_embeds"]
+        ):
             try:
                 channel_id_str = session["channel_id"]
                 channel = _bot_ref.get_channel(int(channel_id_str))
@@ -408,6 +439,8 @@ async def tick_task() -> None:
                             nm,
                         )
                         await channel.send(embed=em)
+                    for occ_em in mil_events["occup_embeds"]:
+                        await channel.send(embed=occ_em)
             except Exception as e:
                 log.warning("Battle channel send error: %s", e)
 

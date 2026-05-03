@@ -15,6 +15,7 @@ from discord_bot.ww1_data import (
     get_active_wars_for_country,
     get_ally_country_ids,
     get_country_armies,
+    get_detailed_armies,
     get_all_provinces_list,
     get_war_details,
     war_declare,
@@ -95,9 +96,10 @@ class WarStatusView(discord.ui.View):
             return
         nm   = _build_name_map()
         date = game_state.get_game_date(self.guild_id)
+        gd   = game_state.get_game_day(self.guild_id)
         em   = embeds.war_status_embed(
             details["war"], details["participants"],
-            details["occupations"], date, nm
+            details["occupations"], date, nm, current_game_day=gd
         )
         if interaction.response.is_done():
             await interaction.message.edit(embed=em, view=self)
@@ -611,6 +613,20 @@ class NonCoreView(discord.ui.View):
         self.add_item(cancel)
 
     async def _do_confirm(self, interaction: discord.Interaction) -> None:
+        from discord_bot.ww1_data import deduct_treasury
+        CORE_GOLD_COST = 60
+        total_cost = CORE_GOLD_COST * len(self.selected)
+        try:
+            deduct_treasury(self.country_id, total_cost)
+        except ValueError as exc:
+            return await interaction.response.send_message(
+                embed=discord.Embed(
+                    title="❌  Insufficient Funds",
+                    description=str(exc),
+                    colour=0xD84315,
+                ),
+                ephemeral=True,
+            )
         gd    = game_state.get_game_day(self.guild_id)
         names = {p["province_id"]: p["province_name"] for p in self.provinces}
         lines = []
@@ -627,6 +643,7 @@ class NonCoreView(discord.ui.View):
                 f"{len(lines)} province(s) queued for core conversion:\n"
                 + "\n".join(lines)
                 + f"\n\n*Conversion time: {CORE_CONV_DAYS} days each.*"
+                + f"\n💰 **Cost paid:** {total_cost} gold ({CORE_GOLD_COST}/province)"
             ),
             colour=0x2E7D32,
         )
@@ -716,6 +733,20 @@ class ReligionView(discord.ui.View):
         self.add_item(cancel)
 
     async def _do_confirm(self, interaction: discord.Interaction) -> None:
+        from discord_bot.ww1_data import deduct_treasury
+        REL_GOLD_COST = 50
+        total_cost = REL_GOLD_COST * len(self.selected)
+        try:
+            deduct_treasury(self.country_id, total_cost)
+        except ValueError as exc:
+            return await interaction.response.send_message(
+                embed=discord.Embed(
+                    title="❌  Insufficient Funds",
+                    description=str(exc),
+                    colour=0xD84315,
+                ),
+                ephemeral=True,
+            )
         gd    = game_state.get_game_day(self.guild_id)
         names = {p["province_id"]: p["province_name"] for p in self.provinces}
         prels = {p["province_id"]: p.get("province_religion", "Unknown") for p in self.provinces}
@@ -739,6 +770,7 @@ class ReligionView(discord.ui.View):
                 f"{len(lines)} province(s) queued for religion conversion:\n"
                 + "\n".join(lines)
                 + f"\n\n*Conversion time: {REL_CONV_DAYS} days each.*"
+                + f"\n💰 **Cost paid:** {total_cost} gold ({REL_GOLD_COST}/province)"
             ),
             colour=0x4A148C,
         )
@@ -1150,7 +1182,7 @@ class WarCog(commands.Cog, name="War"):
         nm = _build_name_map()
         em = embeds.war_status_embed(
             details["war"], details["participants"],
-            details["occupations"], date, nm
+            details["occupations"], date, nm, current_game_day=gd
         )
         view = WarStatusView(target_war_id, cid, str(ctx.guild.id))
         await ctx.send(embed=em, view=view)
@@ -1221,6 +1253,23 @@ class WarCog(commands.Cog, name="War"):
         view = MoveUnitView(cid, armies, provinces, str(ctx.guild.id), enemy_cids)
         em   = embeds.move_army_embed(_country_name(cid), armies, date)
         await ctx.send(embed=em, view=view)
+
+    # ── my_units ──────────────────────────────────────────────────────────────
+
+    @commands.command(name="my_units", aliases=["units", "armies"])
+    async def my_units(self, ctx: commands.Context):
+        """Show the status of all your armies."""
+        my_country = self._get_country(ctx)
+        if my_country is None:
+            return await self._no_country(ctx)
+
+        cid    = my_country["country_id"]
+        cname  = my_country["country_name"]
+        gd     = game_state.get_game_day(str(ctx.guild.id))
+        date   = game_state.game_date_str(gd)
+        armies = get_detailed_armies(cid)
+        em     = embeds.my_units_embed(cname, armies, gd, date)
+        await ctx.send(embed=em)
 
     # ── non_core_province ─────────────────────────────────────────────────────
 

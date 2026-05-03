@@ -1442,10 +1442,12 @@ def _get_shared_war_db():
 def _get_war_system():
     global _war_system_cache
     if _war_system_cache is None:
+        from ww1_economy.religion_system  import ReligionSystem
         from ww1_economy.diplomacy_system import DiplomacySystem
         from ww1_economy.war_system import WarSystem
-        db = _get_shared_war_db()
-        _war_system_cache = WarSystem(db, DiplomacySystem(db))
+        db  = _get_shared_war_db()
+        rel = ReligionSystem(db)
+        _war_system_cache = WarSystem(db, DiplomacySystem(db, rel))
     return _war_system_cache
 
 
@@ -1483,7 +1485,7 @@ def war_declare(attacker: str, defender: str, game_day: int) -> dict:
         for cid in (attacker, defender):
             row = db.get_country(SERVER_ID, SCENARIO_ID, cid)
             if row:
-                new_opinion = max(0, int(row.get("population_opinion") or 50) - 10)
+                new_opinion = max(0, int(row.get("population_opinion") or 50) - 5)
                 new_eff     = max(0.5, float(row.get("economy_efficiency") or 1.0) - 0.10)
                 db.update_country_fields(
                     SERVER_ID, SCENARIO_ID, cid,
@@ -1778,5 +1780,92 @@ def war_spend_insult(
 
 
 def war_end(war_id: str, status: str = "attacker_victory") -> dict:
+    db  = _get_shared_war_db()
+    war = db.get_war(war_id)
+    if war:
+        participants  = db.get_war_participants(war_id)
+        all_countries = {p["country_id"] for p in participants}
+        all_countries.add(war["attacker"])
+        all_countries.add(war["defender"])
+        for cid in all_countries:
+            row = db.get_country(SERVER_ID, SCENARIO_ID, cid)
+            if row:
+                eff = float(row.get("economy_efficiency") or 1.0)
+                op  = int(row.get("population_opinion")   or 50)
+                db.update_country_fields(
+                    SERVER_ID, SCENARIO_ID, cid,
+                    economy_efficiency=min(1.0, eff + 0.10),
+                    population_opinion=min(100, op + 5),
+                )
     msg = _get_war_system().end_war(war_id, status)
     return {"ok": True, "message": msg}
+
+
+def initialize_province_religions() -> None:
+    """Seed province_religions from country_religions for provinces missing an entry."""
+    import sqlite3 as _sqlite3
+    con = _write_conn()
+    con.row_factory = _sqlite3.Row
+    provinces = con.execute(
+        "SELECT province_id, owner_country FROM provinces "
+        "WHERE server_id=? AND scenario_id=?",
+        (SERVER_ID, SCENARIO_ID),
+    ).fetchall()
+    for prov in provinces:
+        pid   = prov["province_id"]
+        owner = prov["owner_country"]
+        if not owner:
+            continue
+        existing = con.execute(
+            "SELECT 1 FROM province_religions "
+            "WHERE server_id=? AND scenario_id=? AND province_id=?",
+            (SERVER_ID, SCENARIO_ID, pid),
+        ).fetchone()
+        if existing:
+            continue
+        rel_row = con.execute(
+            "SELECT religion FROM country_religions "
+            "WHERE server_id=? AND scenario_id=? AND country_id=?",
+            (SERVER_ID, SCENARIO_ID, owner),
+        ).fetchone()
+        if rel_row and rel_row["religion"]:
+            con.execute(
+                "INSERT OR IGNORE INTO province_religions "
+                "(server_id, scenario_id, province_id, religion) VALUES (?,?,?,?)",
+                (SERVER_ID, SCENARIO_ID, pid, rel_row["religion"]),
+            )
+    con.commit()
+    con.close()
+
+
+def get_detailed_armies(country_id: str) -> list[dict]:
+    """Return all non-destroyed armies with movement and destination details."""
+    import sqlite3 as _sqlite3
+    with _conn() as con:
+        con.row_factory = _sqlite3.Row
+        rows = con.execute(
+            """
+            SELECT a.army_id, a.province_id, a.state, a.strength_pct,
+                   a.destination_province_id, a.movement_end_day,
+                   a.rowid,
+                   p.province_name,
+                   pd.province_name AS dest_name
+            FROM armies a
+            LEFT JOIN provinces p
+              ON p.province_id  = a.province_id
+             AND p.server_id    = a.server_id AND p.scenario_id = a.scenario_id
+            LEFT JOIN provinces pd
+              ON pd.province_id  = a.destination_province_id
+             AND pd.server_id   = a.server_id AND pd.scenario_id = a.scenario_id
+            WHERE a.server_id=? AND a.scenario_id=? AND a.country_id=?
+              AND a.state NOT IN ('destroyed')
+            ORDER BY a.rowid
+            """,
+            (SERVER_ID, SCENARIO_ID, country_id),
+        ).fetchall()
+    result = []
+    for i, r in enumerate(rows, start=1):
+        d = dict(r)
+        d["army_num"] = i
+        result.append(d)
+    return result

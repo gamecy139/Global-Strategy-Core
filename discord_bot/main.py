@@ -99,6 +99,14 @@ class RoleplayBot(commands.Bot):
         except Exception as exc:
             log.warning("Troop-definition seeding failed (non-fatal): %s", exc)
 
+        # Seed province religions from country religions (fixes "Unknown Religion" bug)
+        try:
+            from discord_bot.ww1_data import initialize_province_religions
+            initialize_province_religions()
+            log.info("Province religions seeded.")
+        except Exception as exc:
+            log.warning("Province religion seeding failed (non-fatal): %s", exc)
+
         await self.load_extension("discord_bot.cogs.game")
         await self.load_extension("discord_bot.cogs.economy")
         await self.load_extension("discord_bot.cogs.recruit")

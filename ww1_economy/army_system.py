@@ -386,15 +386,15 @@ class ArmySystem:
         if (current_day - last_supply) < SUPPLY_INTERVAL_DAYS:
             return None
 
-        # Army population
-        units = self._db.get_army_units(army_id)
-        army_pop = self._compute_army_pop(army_id, server_id, scenario_id, units)
-
-        food_need     = math.ceil(army_pop / FOOD_POP_DIVISOR)
-        ammo_need     = math.ceil(army_pop / AMMO_POP_DIVISOR)
-        medicine_need = math.ceil(army_pop / MEDICINE_POP_DIVISOR)
-
         country_id = row["country_id"]
+
+        # Consumption = ceil(country_total_population / 1000) per resource per army
+        country_row  = self._db.get_country(server_id, scenario_id, country_id)
+        country_pop  = int(country_row.get("total_population") or 0) if country_row else 0
+        SUPPLY_DIV   = 1000
+        food_need     = max(1, math.ceil(country_pop / SUPPLY_DIV))
+        ammo_need     = max(1, math.ceil(country_pop / SUPPLY_DIV))
+        medicine_need = max(1, math.ceil(country_pop / SUPPLY_DIV))
 
         # Consume food: meat first, then grain
         food_met = self._consume_food(server_id, scenario_id, country_id, food_need)
@@ -434,7 +434,7 @@ class ArmySystem:
         return SupplyResult(
             army_id          = army_id,
             country_id       = country_id,
-            army_pop         = army_pop,
+            army_pop         = country_pop,
             food_needed      = food_need,
             ammo_needed      = ammo_need,
             medicine_needed  = medicine_need,

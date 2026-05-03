@@ -1378,12 +1378,87 @@ def war_declare_embed(
     return e
 
 
+def my_units_embed(
+    country_name: str,
+    armies: list[dict],
+    current_game_day: int,
+    date_str: str,
+) -> discord.Embed:
+    if not armies:
+        return _base(
+            f"🪖  {country_name} — No Active Units",
+            "You have no armies. Use `rp recruit` to train troops.",
+            COL_GREY,
+        )
+    lines = []
+    for a in armies:
+        num   = a["army_num"]
+        state = a.get("state", "idle")
+        str_  = float(a.get("strength_pct") or 100)
+        pname = a.get("province_name") or a.get("province_id") or "?"
+        if state == "moving":
+            dest    = a.get("dest_name") or a.get("destination_province_id") or "?"
+            end_day = a.get("movement_end_day")
+            eta     = max(0, int(end_day) - current_game_day) if end_day else "?"
+            lines.append(
+                f"**Army #{num}**  🚶 *Marching*\n"
+                f"  `{pname}` → `{dest}`  |  ⏳ ETA: **{eta} day(s)**  |  Str: {str_:.0f}%"
+            )
+        elif state == "in_combat":
+            lines.append(
+                f"**Army #{num}**  ⚔️ *In Battle*\n"
+                f"  Location: `{pname}`  |  Str: {str_:.0f}%"
+            )
+        elif state == "retreating":
+            lines.append(
+                f"**Army #{num}**  🏃 *Retreating*\n"
+                f"  At: `{pname}`  |  Str: {str_:.0f}%"
+            )
+        elif state == "recruiting":
+            lines.append(
+                f"**Army #{num}**  🔨 *Recruiting*\n"
+                f"  Base: `{pname}`  |  Str: {str_:.0f}%"
+            )
+        else:
+            lines.append(
+                f"**Army #{num}**  ✅ *Ready*\n"
+                f"  Stationed: `{pname}`  |  Str: {str_:.0f}%"
+            )
+    return _base(
+        f"🪖  {country_name} — Army Status  ({date_str})",
+        "\n".join(lines),
+        COL_TEAL,
+    )
+
+
+def occupation_feedback_embed(
+    province_name: str,
+    occupying_country: str,
+    previous_owner: str,
+    name_map: dict[str, str] | None = None,
+) -> discord.Embed:
+    nm        = name_map or {}
+    occ_name  = nm.get(occupying_country, occupying_country)
+    prev_name = nm.get(previous_owner,    previous_owner)
+    return _base(
+        "🚩  Province Occupied!",
+        (
+            f"**{province_name}** has been fully occupied!\n\n"
+            f"🏴 **Occupying force:** {occ_name}\n"
+            f"🏳️ **Previous owner:** {prev_name}\n\n"
+            f"*The province may be annexed at the end of the war.*"
+        ),
+        COL_RED,
+    )
+
+
 def war_status_embed(
     war: dict,
     participants: list[dict],
     occupations: list[dict],
     date_str: str,
     name_map: dict[str, str],   # country_id → country_name
+    current_game_day: int = 0,
 ) -> discord.Embed:
     att_id = war["attacker"]
     def_id = war["defender"]
@@ -1399,8 +1474,18 @@ def war_status_embed(
     att_bar = "█" * att_blocks + "░" * (10 - att_blocks)
     def_bar = "█" * def_blocks + "░" * (10 - def_blocks)
 
+    start_day    = int(war.get("start_day") or 0)
+    duration_days = max(0, current_game_day - start_day)
+    if duration_days >= 360:
+        dur_str = f"{duration_days // 360}y {(duration_days % 360) // 30}m {duration_days % 30}d"
+    elif duration_days >= 30:
+        dur_str = f"{duration_days // 30}m {duration_days % 30}d"
+    else:
+        dur_str = f"{duration_days} day(s)"
+
     desc_lines = [
         f"**⚔️  {att_name}  vs  {def_name}**",
+        f"📅 Duration: **{dur_str}**",
         "",
         f"🟥 **{att_name}**  `[{att_bar}]`  **{att_score:.0f}**",
         f"🟦 **{def_name}**  `[{def_bar}]`  **{def_score:.0f}**",
