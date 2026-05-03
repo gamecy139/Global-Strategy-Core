@@ -137,7 +137,11 @@ def _get_province_dict(server_id: str) -> dict[str, dict]:
     return province_dict
 
 
-def render_map_png(output_width: int = 1400, server_id: str = SERVER_ID) -> bytes:
+def render_map_png(
+    output_width: int = 1400,
+    server_id: str = SERVER_ID,
+    svg_output_path: str | None = None,
+) -> bytes:
     """
     Color every province in the SVG by its current owner and return PNG bytes.
 
@@ -206,6 +210,11 @@ def render_map_png(output_width: int = 1400, server_id: str = SERVER_ID) -> byte
 
         # Set fill attribute directly — hex only, never a color name
         element.set("fill", color)
+
+    # ── Save colored SVG per-server if requested ───────────────────────────
+    if svg_output_path:
+        tree.write(svg_output_path, xml_declaration=True, encoding="UTF-8")
+        log.debug("Colored SVG saved: %s", svg_output_path)
 
     # ── Render to PNG via rsvg-convert ────────────────────────────────────
     svg_bytes = etree.tostring(root, xml_declaration=True, encoding="UTF-8")

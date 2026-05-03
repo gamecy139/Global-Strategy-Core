@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import os
 
 import discord
 from discord.ext import commands
@@ -37,19 +38,28 @@ class MapCog(commands.Cog, name="Map"):
         """Render the current political map coloured by country ownership."""
         status = await ctx.send("🗺️  Generating map… this may take a few seconds.")
 
+        guild_id    = str(ctx.guild.id)
+        svg_output  = f"colored_map_{guild_id}.svg"
+
+        print(f"Sending map for guild: {guild_id}")
+        print(f"File: {svg_output}")
+
         try:
             from discord_bot.map_renderer import render_map_png
             loop      = asyncio.get_event_loop()
-            guild_id  = str(ctx.guild.id)
             png_bytes = await loop.run_in_executor(
-                None, lambda: render_map_png(server_id=guild_id)
+                None,
+                lambda: render_map_png(server_id=guild_id, svg_output_path=svg_output),
             )
         except Exception as exc:
             log.exception("Map render failed")
             await status.edit(content=f"❌  Map render failed: {exc}")
             return
 
-        file  = discord.File(io.BytesIO(png_bytes), filename="map.png")
+        # Send the colored SVG (per-server) as a file attachment
+        svg_file  = discord.File(svg_output, filename=os.path.basename(svg_output))
+        # Also embed the PNG for inline preview
+        png_file  = discord.File(io.BytesIO(png_bytes), filename="map.png")
         embed = discord.Embed(
             title="⚔️  Political Map — WW1 1914",
             colour=0x2B2D31,
@@ -59,7 +69,7 @@ class MapCog(commands.Cog, name="Map"):
         embed.add_field(name="\u200b",      value=_LEGEND_UNOWNED, inline=False)
         embed.set_image(url="attachment://map.png")
         await status.delete()
-        await ctx.send(file=file, embed=embed)
+        await ctx.send(files=[png_file, svg_file], embed=embed)
 
 
 async def setup(bot: commands.Bot) -> None:
